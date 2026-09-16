@@ -1,0 +1,27 @@
+// PM2 process file for this service. CommonJS on purpose: PM2 loads config files with require().
+//   pm2 start ecosystem.config.cjs
+//   pm2 save && pm2 startup     # persist across reboots
+// Environment comes from ./.env via Node's --env-file, so secrets never sit in this file.
+const path = require('node:path');
+
+module.exports = {
+  apps: [
+    {
+      name: 'audit',
+      cwd: __dirname,
+      script: 'src/index.js',
+      node_args: ['--disable-warning=ExperimentalWarning', `--env-file=${path.join(__dirname, '.env')}`],
+      exec_mode: 'fork',
+      instances: 1,             // one process per SQLite file; the hash chain must have a single writer
+      autorestart: true,
+      exp_backoff_restart_delay: 200,
+      max_restarts: 20,
+      max_memory_restart: '300M',
+      wait_ready: true,         // process.send('ready') after listen()
+      listen_timeout: 10000,
+      kill_timeout: 35000,      // SIGTERM → finish in-flight requests and exports → exit (internal force-exit at 30s)
+      merge_logs: true,
+      env: { NODE_ENV: 'production' },
+    },
+  ],
+};
