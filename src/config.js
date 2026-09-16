@@ -12,7 +12,7 @@ export class ConfigError extends Error {
 /** Validated service configuration. Build with {@link Config.fromEnv}. */
 export class Config {
   static MIN_SECRET_LENGTH = 32;
-  static DEFAULT_REDACT_KEYS = ['password', 'passwd', 'secret', 'token', 'accesstoken', 'refreshtoken', 'authorization', 'cookie', 'apikey', 'privatekey', 'otp', 'totp'];
+  static DEFAULT_REDACT_KEYS = ['password', 'passwd', 'secret', 'token', 'accesstoken', 'refreshtoken', 'authorization', 'cookie', 'apikey', 'privatekey', 'otp', 'totp', 'cardnumber', 'pan', 'cvv', 'iban', 'ssn'];
 
   /** @param {import('./types.js').ConfigValues} v */
   constructor(v) {

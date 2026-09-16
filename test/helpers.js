@@ -47,3 +47,29 @@ export function record(o = {}) {
     receivedAt: now,
   };
 }
+
+/**
+ * Fully wired Fastify app over an in-memory database.
+ * @param {Record<string, string>} [overrides]
+ */
+export async function buildApp(overrides) {
+  const { AuditService } = await import('../src/domain/audit-service.js');
+  const { AuditApi } = await import('../src/http/audit-api.js');
+  const { Redactor } = await import('../src/redactor.js');
+  const { EventStore } = await import('../src/store/event-store.js');
+  const config = testConfig(overrides);
+  const db = memoryDb();
+  const events = new EventStore(db);
+  const service = new AuditService({
+    events, redactor: new Redactor(config.redactKeys),
+    options: { maxBatch: config.maxBatch, metaMaxBytes: config.metaMaxBytes, clockSkewMs: config.clockSkewSec * 1000, verifyMaxRows: config.verifyMaxRows },
+  });
+  const app = await new AuditApi({ config, service, events, db }).build();
+  await app.ready();
+  return { app, db, events, service, config };
+}
+
+/** @param {string} key */
+export function bearer(key) {
+  return { authorization: `Bearer ${key}` };
+}
