@@ -21,6 +21,7 @@
  * @property {{ certPath: string, keyPath: string }|null} tls
  * @property {number} bodyLimit
  * @property {string} dbPath
+ * @property {string} [dbBackupDir]
  * @property {ApiKey[]} apiKeys
  * @property {number} rateLimitMax
  * @property {number} retentionDays

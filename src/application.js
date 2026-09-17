@@ -15,7 +15,7 @@ export class Application {
   /** @param {Config} config */
   constructor(config) {
     this.config = config;
-    this.db = new Database(config.dbPath);
+    this.db = new Database(config.dbPath, { backupDir: config.dbBackupDir });
     this.events = new EventStore(this.db);
     this.service = new AuditService({
       events: this.events,

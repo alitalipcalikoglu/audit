@@ -140,7 +140,17 @@ resets on restart.
 ## Backup / restore
 
 Back up the database file; the whole point of the chain is that a restore from an incomplete
-backup is detectable (`GET /v1/chain/verify` will report a gap) rather than silently wrong.
+backup is detectable (`GET /v1/chain/verify` will report a gap) rather than silently wrong. Use
+`stack backup`/`stack restore` from the workspace root (see `stack/docs/UPGRADE.md`) to do this
+consistently alongside the rest of the stack — audit is not itself included in its own backup scope
+beyond its database. On every start, before applying a pending migration to an existing database,
+the service itself also snapshots the file to `DB_PATH.pre-v<N>-<timestamp>` (directory overridable
+with `DB_BACKUP_DIR`) — a manual last resort if `stack restore` is unavailable.
+
+**Rollback limitations:** none of the migrations are reversible; to roll back, restore the
+pre-migration copy (or a `stack backup` snapshot taken before the upgrade) and run the previous
+version of this service against it. A restore rewinds the chain — always re-run `/v1/chain/verify`
+afterward.
 
 See [docs/READINESS.md](docs/READINESS.md) for the full contract.
 

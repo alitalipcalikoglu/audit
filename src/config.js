@@ -19,6 +19,7 @@ export class Config {
     this.tls = v.tls;
     this.bodyLimit = v.bodyLimit;
     this.dbPath = v.dbPath;
+    this.dbBackupDir = v.dbBackupDir;
     this.apiKeys = v.apiKeys;
     this.rateLimitMax = v.rateLimitMax;
     this.retentionDays = v.retentionDays;
@@ -50,6 +51,7 @@ export class Config {
       tls: certPath ? { certPath, keyPath } : null,
       bodyLimit: r.integer('BODY_LIMIT', 1_048_576, { min: 4_096, max: 16_777_216 }),
       dbPath: r.optional('DB_PATH') || './data/audit.db',
+      dbBackupDir: r.optional('DB_BACKUP_DIR') || undefined,
       apiKeys: Config.#parseApiKeys(r.required('AUDIT_API_KEYS')),
       rateLimitMax: r.integer('RATE_LIMIT_MAX', 1_200, { min: 1 }),
       retentionDays: r.integer('RETENTION_DAYS', 365, { min: 1 }),
