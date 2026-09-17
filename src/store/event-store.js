@@ -180,14 +180,18 @@ export class EventStore {
   }
 
   /**
-   * Stream matching rows oldest first without loading them all; stops after `maxRows`.
+   * Stream matching rows oldest first without loading them all; stops after `maxRows`. Prepares
+   * its own statement rather than going through {@link #cached}: `StatementSync#iterate()`
+   * shares one cursor per statement object, so two concurrent exports with the same filter would
+   * otherwise reset each other's iterator mid-stream (one caller's `.next()` rewinds the other's).
+   * A fresh statement per call keeps each export's cursor independent.
    * @param {EventFilter} filter
    * @param {number} maxRows
    * @returns {IterableIterator<EventRow>}
    */
   iterate(filter, maxRows) {
     const { where, params } = FilterSql.build(filter);
-    const stmt = this.#cached(`SELECT ${EventStore.COLUMNS} FROM events ${where} ORDER BY at ASC, seq ASC LIMIT ?`);
+    const stmt = this.db.prepare(`SELECT ${EventStore.COLUMNS} FROM events ${where} ORDER BY at ASC, seq ASC LIMIT ?`);
     return /** @type {IterableIterator<EventRow>} */ (stmt.iterate(...params, maxRows));
   }
 

@@ -82,6 +82,23 @@ test('EventStore: filters, prefix range and keyset paging', () => {
   assert.deepEqual([...store.iterate({ actionPrefix: 'auth.' }, 2)].map((r) => r.action), ['auth.login', 'auth.login']);
 });
 
+test('EventStore: two concurrent iterate() calls with the same filter do not interfere', () => {
+  const store = new EventStore(memoryDb());
+  const t0 = 1_700_000_000_000;
+  store.append(Array.from({ length: 5 }, (_, i) => record({ action: 'auth.login', at: t0 + i })));
+  // Interleave step-by-step, as two simultaneous exports streaming to two HTTP responses would:
+  // iterator A pulls one row, then B starts and pulls a row, then A resumes, etc. Before the fix
+  // both iterators shared one cached StatementSync, so starting B rewound A's cursor.
+  const a = store.iterate({ actionPrefix: 'auth.' }, 10);
+  const first = a.next();
+  assert.equal(first.value?.at, t0);
+  const b = store.iterate({ actionPrefix: 'auth.' }, 10);
+  const aRest = [...a].map((r) => r.at);
+  const bAll = [...b].map((r) => r.at);
+  assert.deepEqual(aRest, [t0 + 1, t0 + 2, t0 + 3, t0 + 4], "A's cursor is unaffected by B starting mid-stream");
+  assert.deepEqual(bAll, [t0, t0 + 1, t0 + 2, t0 + 3, t0 + 4], "B sees the full result set from its own start");
+});
+
 test('EventStore: purge keeps a verifiable chain via checkpoint', () => {
   const store = new EventStore(memoryDb());
   const t0 = 1_700_000_000_000;
