@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
+import { createErrorHandler, registerProbes } from '@atc-web/service-core/fastify';
 import { AuditError } from '../domain/errors.js';
 import { ApiKeyAuth } from './api-key-auth.js';
 import { Exporter } from './exporter.js';
@@ -36,7 +37,6 @@ export class AuditApi {
     this.db = db;
     this.logger = logger;
     this.auth = new ApiKeyAuth(config.apiKeys);
-    this.readyCache = { at: 0, ok: false, error: '' };
   }
 
   /** @returns {Promise<FastifyInstance>} */
@@ -54,63 +54,19 @@ export class AuditApi {
     });
     app.decorateRequest('apiKeyId', '');
     app.decorateRequest('apiKeyRole', 'read');
-    app.setErrorHandler(this.#errorHandler);
+    app.setErrorHandler(createErrorHandler(AuditError));
     app.setNotFoundHandler((_request, reply) => {
       reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'route not found' } });
     });
     app.addHook('onSend', async (_request, reply) => {
       if (!reply.hasHeader('cache-control')) reply.header('cache-control', 'no-store');
     });
-    this.#registerPublic(app);
+    registerProbes(app, () => this.db.ping(), { cacheMs: AuditApi.READY_CACHE_MS });
     await app.register((api) => this.#registerV1(api), { prefix: '/v1' });
     await app.register((ops) => this.#registerMetrics(ops));
     return app;
   }
 
-  /** @type {FastifyInstance['errorHandler']} */
-  #errorHandler = (rawErr, request, reply) => {
-    const err = /** @type {import('fastify').FastifyError & { validation?: { instancePath: string, message?: string, params: object }[] }} */ (rawErr);
-    if (err instanceof AuditError) {
-      return reply.code(err.statusCode).send({ error: { code: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) } });
-    }
-    if (err.validation) {
-      return reply.code(400).send({
-        error: { code: 'VALIDATION_FAILED', message: err.message, details: err.validation.map((v) => ({ path: v.instancePath, message: v.message, params: v.params })) },
-      });
-    }
-    const status = err.statusCode && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 500;
-    if (status >= 500) {
-      request.log.error({ err }, 'unhandled error');
-      return reply.code(status).send({ error: { code: 'INTERNAL_ERROR', message: 'internal error' } });
-    }
-    return reply.code(status).send({ error: { code: err.code ?? 'REQUEST_ERROR', message: err.message } });
-  };
-
-  /** @param {FastifyInstance} app */
-  #registerPublic(app) {
-    app.get('/health', { logLevel: 'warn' }, async () => ({ status: 'ok' }));
-    app.get('/ready', { logLevel: 'warn' }, async (_request, reply) => {
-      const ready = this.#readiness();
-      if (!ready.ok) {
-        app.log.warn({ error: ready.error }, 'readiness check failed');
-        return reply.code(503).send({ status: 'unavailable', error: ready.error });
-      }
-      return { status: 'ok' };
-    });
-  }
-
-  #readiness() {
-    const now = Date.now();
-    if (now - this.readyCache.at > AuditApi.READY_CACHE_MS) {
-      try {
-        this.db.ping();
-        this.readyCache = { at: now, ok: true, error: '' };
-      } catch (err) {
-        this.readyCache = { at: now, ok: false, error: err instanceof Error ? err.message : String(err) };
-      }
-    }
-    return this.readyCache;
-  }
 
   /** @param {FastifyInstance} api */
   async #registerV1(api) {

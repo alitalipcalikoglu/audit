@@ -1,46 +1,36 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { ApiKeyAuth as CoreApiKeyAuth } from '@atc-web/service-core/auth';
 import { AuditError } from '../domain/errors.js';
 
 /** @typedef {import('../types.js').ApiKey} ApiKey */
 /** @typedef {import('../types.js').KeyRole} KeyRole */
 
 /**
- * Bearer API-key authentication for Fastify with read/write roles. Every configured key is
- * compared in constant time so timing does not reveal whether, or which, key matched.
+ * Bearer API-key authentication for Fastify with read/write roles. Thin wrapper over
+ * service-core's `ApiKeyAuth`: keeps this service's `request.apiKeyId`/`request.apiKeyRole` split
+ * decoration.
  */
 export class ApiKeyAuth {
   /** @param {ApiKey[]} apiKeys */
   constructor(apiKeys) {
-    this.apiKeys = apiKeys;
+    this.core = new CoreApiKeyAuth(apiKeys, {
+      decorate: (request, key) => { request.apiKeyId = key.id; request.apiKeyRole = /** @type {KeyRole} */ (key.role); },
+    });
   }
 
-  /**
-   * Fastify `onRequest` hook. Arrow property so it can be passed directly to `addHook`.
-   * @param {import('fastify').FastifyRequest} request
-   * @param {import('fastify').FastifyReply} reply
-   */
-  hook = async (request, reply) => {
-    const header = request.headers.authorization ?? '';
-    const secret = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
-    const key = secret ? this.identify(secret) : undefined;
-    if (!key) {
-      reply.header('www-authenticate', 'Bearer');
-      return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'missing or invalid API key' } });
-    }
-    request.apiKeyId = key.id;
-    request.apiKeyRole = key.role;
-  };
+  /** Fastify `onRequest` hook. */
+  get hook() {
+    return this.core.hook;
+  }
 
   /**
    * Route-level guard. Returns a `preHandler` that rejects keys lacking the capability.
    * @param {'read'|'write'} need
    */
   static require(need) {
-    /** @param {import('fastify').FastifyRequest} request */
-    return async (request) => {
-      const role = request.apiKeyRole;
-      if (role !== need && role !== 'readwrite') throw new AuditError('FORBIDDEN', `this API key has no ${need} access`);
-    };
+    return CoreApiKeyAuth.require(need, {
+      roleOf: (request) => /** @type {any} */ (request).apiKeyRole,
+      makeError: (n) => new AuditError('FORBIDDEN', `this API key has no ${n} access`),
+    });
   }
 
   /**
@@ -48,20 +38,6 @@ export class ApiKeyAuth {
    * @returns {ApiKey|undefined} Matching key.
    */
   identify(secret) {
-    /** @type {ApiKey|undefined} */
-    let matched;
-    for (const key of this.apiKeys) {
-      if (ApiKeyAuth.#secretsEqual(secret, key.secret)) matched = key;
-    }
-    return matched;
-  }
-
-  /**
-   * Constant-time comparison independent of input length.
-   * @param {string} a
-   * @param {string} b
-   */
-  static #secretsEqual(a, b) {
-    return timingSafeEqual(createHash('sha256').update(a).digest(), createHash('sha256').update(b).digest());
+    return /** @type {ApiKey|undefined} */ (/** @type {any} */ (this.core.identify(secret)));
   }
 }
