@@ -26,11 +26,15 @@ export class AuditService {
    * @param {EventStore} deps.events
    * @param {Redactor} deps.redactor
    * @param {ServiceOptions} deps.options
+   * @param {import('../crypto/anchor-signer.js').AnchorSigner|null} [deps.anchorSigner] Only when
+   *   configured (`ANCHOR_PRIVATE_KEY_PATH` set) does `verify()` also check anchors in range —
+   *   without it, verification is exactly the Stage-2 hash-chain check, unchanged.
    */
-  constructor({ events, redactor, options }) {
+  constructor({ events, redactor, options, anchorSigner = null }) {
     this.events = events;
     this.redactor = redactor;
     this.options = options;
+    this.anchorSigner = anchorSigner;
   }
 
   /**
@@ -114,38 +118,73 @@ export class AuditService {
 
   /**
    * Recompute hashes over `[fromSeq, toSeq]` in chunks. Verification needs a trusted
-   * predecessor: the previous row, a purge checkpoint, or genesis.
+   * predecessor: the previous row, a purge checkpoint, or genesis. When anchors are configured
+   * (`this.anchorSigner`), every anchor whose `seq` falls in range is additionally checked against
+   * the hash `verify()` itself just recomputed for that seq (catches a tampered/forged anchor even
+   * if the live chain around it is untouched) and its signature (catches a forged or corrupted
+   * signature, or one from an unrecognised key).
    * @param {{ fromSeq?: number, toSeq?: number }} range
    */
   verify({ fromSeq, toSeq } = {}) {
     const head = this.events.head();
     const min = this.events.minSeq();
-    if (min === null) return { ok: true, checked: 0, fromSeq: null, toSeq: null, firstBroken: null, head };
+    const anchors = { checked: 0, invalid: /** @type {{ seq: number, reason: string }[]} */ ([]) };
+    if (min === null) return { ok: true, checked: 0, fromSeq: null, toSeq: null, firstBroken: null, head, anchors };
     const from = fromSeq ?? min;
     const to = toSeq ?? head.seq;
     if (to < from) throw new AuditError('RANGE_TOO_LARGE', 'toSeq must be >= fromSeq');
     if (to - from + 1 > this.options.verifyMaxRows) throw new AuditError('RANGE_TOO_LARGE', `verify at most ${this.options.verifyMaxRows} events per request`, { max: this.options.verifyMaxRows });
     const startPrev = this.events.trustedPrevHash(from);
-    if (startPrev === null) return { ok: false, checked: 0, fromSeq: from, toSeq: to, firstBroken: from, head, reason: `no trusted predecessor for seq ${from}` };
+    if (startPrev === null) return { ok: false, checked: 0, fromSeq: from, toSeq: to, firstBroken: from, head, reason: `no trusted predecessor for seq ${from}`, anchors };
     let prev = startPrev;
     let checked = 0;
     let expectedSeq = from;
+    const anchorBySeq = this.anchorSigner ? new Map(this.events.anchorsRange(from, to).map((a) => [a.seq, a])) : null;
     for (let cursor = from; cursor <= to;) {
       const rows = this.events.range(cursor, to, 1_000);
       if (rows.length === 0) break;
       for (const row of rows) {
         // A gap in seq means a row was deleted; the hash check below would also catch it, but report it precisely.
-        if (row.seq !== expectedSeq) return { ok: false, checked, fromSeq: from, toSeq: to, firstBroken: expectedSeq, head, reason: `seq ${expectedSeq} is missing` };
+        if (row.seq !== expectedSeq) return { ok: false, checked, fromSeq: from, toSeq: to, firstBroken: expectedSeq, head, reason: `seq ${expectedSeq} is missing`, anchors };
         expectedSeq++;
       }
       const r = HashChain.verify(rows, prev);
       checked += r.checked;
-      if (r.firstBroken !== null) return { ok: false, checked, fromSeq: from, toSeq: to, firstBroken: r.firstBroken, head, reason: `hash mismatch at seq ${r.firstBroken}` };
+      if (r.firstBroken !== null) return { ok: false, checked, fromSeq: from, toSeq: to, firstBroken: r.firstBroken, head, reason: `hash mismatch at seq ${r.firstBroken}`, anchors };
+      if (anchorBySeq) {
+        for (const row of rows) {
+          const a = anchorBySeq.get(row.seq);
+          if (!a) continue;
+          anchors.checked++;
+          if (a.hash !== row.hash) { anchors.invalid.push({ seq: a.seq, reason: 'anchor hash does not match the chain at that seq' }); continue; }
+          const v = /** @type {import('../crypto/anchor-signer.js').AnchorSigner} */ (this.anchorSigner).verify({ seq: a.seq, hash: a.hash, at: a.at, keyId: a.key_id, signature: a.signature });
+          if (!v.ok) anchors.invalid.push({ seq: a.seq, reason: `anchor signature invalid: ${v.reason}` });
+        }
+      }
       prev = /** @type {string} */ (r.lastHash);
       cursor = /** @type {number} */ (r.lastSeq) + 1;
     }
-    if (expectedSeq <= to) return { ok: false, checked, fromSeq: from, toSeq: to, firstBroken: expectedSeq, head, reason: `seq ${expectedSeq} is missing` };
-    return { ok: true, checked, fromSeq: from, toSeq: to, firstBroken: null, head };
+    if (expectedSeq <= to) return { ok: false, checked, fromSeq: from, toSeq: to, firstBroken: expectedSeq, head, reason: `seq ${expectedSeq} is missing`, anchors };
+    if (anchors.invalid.length > 0) {
+      return { ok: false, checked, fromSeq: from, toSeq: to, firstBroken: anchors.invalid[0].seq, head, reason: `seq ${anchors.invalid[0].seq}: ${anchors.invalid[0].reason}`, anchors };
+    }
+    return { ok: true, checked, fromSeq: from, toSeq: to, firstBroken: null, head, anchors };
+  }
+
+  /**
+   * Sign and record an anchor over the current chain head. Returns `null`, writing nothing, when
+   * the head hasn't advanced since the last anchor — nothing new to attest to, and `anchors.seq`
+   * is a `PRIMARY KEY` so re-anchoring an unchanged head would otherwise conflict.
+   * @param {number} [now]
+   * @returns {import('../types.js').AnchorRow|null}
+   */
+  anchor(now = Date.now()) {
+    if (!this.anchorSigner) throw new Error('AuditService.anchor(): no anchorSigner configured (ANCHOR_PRIVATE_KEY_PATH)');
+    const head = this.events.head();
+    const last = this.events.latestAnchor();
+    if (last && last.seq === head.seq) return null;
+    const signature = this.anchorSigner.sign({ seq: head.seq, hash: head.hash, at: now });
+    return this.events.recordAnchor({ seq: head.seq, hash: head.hash, at: now, keyId: this.anchorSigner.keyId, signature });
   }
 
   /**

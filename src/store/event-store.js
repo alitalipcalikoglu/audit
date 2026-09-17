@@ -74,6 +74,10 @@ export class EventStore {
       statsAction: db.prepare(`SELECT action, COUNT(*) AS n FROM events WHERE at >= ? GROUP BY action ORDER BY n DESC LIMIT 10`),
       statsActor: db.prepare(`SELECT actor_type, actor_id, actor_name, COUNT(*) AS n FROM events WHERE at >= ? AND actor_id IS NOT NULL GROUP BY actor_type, actor_id ORDER BY n DESC LIMIT 10`),
       statsFailures: db.prepare(`SELECT action, COUNT(*) AS n FROM events WHERE at >= ? AND outcome <> 'success' GROUP BY action ORDER BY n DESC LIMIT 10`),
+      insertAnchor: db.prepare(`INSERT INTO anchors (seq, hash, at, key_id, signature) VALUES (?, ?, ?, ?, ?)`),
+      latestAnchor: db.prepare(`SELECT seq, hash, at, key_id, signature FROM anchors ORDER BY seq DESC LIMIT 1`),
+      anchorsRange: db.prepare(`SELECT seq, hash, at, key_id, signature FROM anchors WHERE seq >= ? AND seq <= ? ORDER BY seq ASC`),
+      anchorsPage: db.prepare(`SELECT seq, hash, at, key_id, signature FROM anchors WHERE seq < ? ORDER BY seq DESC LIMIT ?`),
     };
     /** @type {Map<string, import('node:sqlite').StatementSync>} */
     this.filterCache = new Map();
@@ -250,6 +254,39 @@ export class EventStore {
       topActors: /** @type {{ actor_type: string, actor_id: string, actor_name: string|null, n: number }[]} */ (this.stmt.statsActor.all(since)).map((r) => ({ type: r.actor_type, id: r.actor_id, name: r.actor_name, count: n(r) })),
       topFailures: /** @type {{ action: string, n: number }[]} */ (this.stmt.statsFailures.all(since)).map((r) => ({ action: r.action, count: n(r) })),
     };
+  }
+
+  /**
+   * @param {{ seq: number, hash: string, at: number, keyId: string, signature: string }} a
+   * @returns {import('../types.js').AnchorRow}
+   */
+  recordAnchor(a) {
+    this.stmt.insertAnchor.run(a.seq, a.hash, a.at, a.keyId, a.signature);
+    return { seq: a.seq, hash: a.hash, at: a.at, key_id: a.keyId, signature: a.signature };
+  }
+
+  /** Most recently written anchor, or null when none exist yet. */
+  latestAnchor() {
+    return /** @type {import('../types.js').AnchorRow|undefined} */ (this.stmt.latestAnchor.get()) ?? null;
+  }
+
+  /**
+   * Anchors covering `[fromSeq, toSeq]`, chain order — for `verify()` to cross-check against the
+   * hashes it recomputes for those same seqs.
+   * @param {number} fromSeq @param {number} toSeq
+   * @returns {import('../types.js').AnchorRow[]}
+   */
+  anchorsRange(fromSeq, toSeq) {
+    return /** @type {import('../types.js').AnchorRow[]} */ (this.stmt.anchorsRange.all(fromSeq, toSeq));
+  }
+
+  /**
+   * Newest first, keyset pagination on seq — for `GET /v1/chain/anchors`.
+   * @param {{ limit: number, beforeSeq?: number }} page
+   * @returns {import('../types.js').AnchorRow[]}
+   */
+  anchorsList({ limit, beforeSeq = Number.MAX_SAFE_INTEGER }) {
+    return /** @type {import('../types.js').AnchorRow[]} */ (this.stmt.anchorsPage.all(beforeSeq, limit));
   }
 
   /** @param {string} sql */

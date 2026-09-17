@@ -70,4 +70,9 @@ export class Schemas {
     type: 'object', additionalProperties: false,
     properties: { hours: { type: 'string', pattern: '^([1-9]|[1-9][0-9]|[1-6][0-9][0-9]|7[01][0-9]|720)$' } },
   };
+
+  static anchorsQuery = {
+    type: 'object', additionalProperties: false,
+    properties: { limit: { type: 'string', pattern: '^([1-9]|[1-9][0-9]|1[0-9][0-9]|200)$' }, beforeSeq: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' } },
+  };
 }

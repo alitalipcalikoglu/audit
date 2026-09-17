@@ -6,7 +6,7 @@ Every stored event gets `hash = SHA-256(prevHash + "\n" + canonical(event))`, wh
 
 If anyone edits a stored row, deletes one, or inserts one in the middle, every later hash no longer matches. Recomputing the chain from a trusted point detects this.
 
-What it does **not** prove: that the service itself, or someone with write access to the database file *and* the ability to rewrite all later hashes, is honest. For that, anchor the head externally (below).
+What it does **not** prove by itself: that the service itself, or someone with write access to the database file *and* the ability to rewrite all later hashes, is honest. Signed periodic anchors close most of that gap — see [chain anchors](chain-anchors.md).
 
 ## Head
 
@@ -41,16 +41,6 @@ On tampering:
 ```
 
 `reason` is either `hash mismatch at seq N` (a row was changed, or an earlier row removed and the gap closed) or `seq N is missing` (a row was deleted).
-
-## Anchoring the head externally
-
-Once a day, store the head somewhere the service cannot reach: a ticket, a git commit, a write-once bucket, a different team's log.
-
-```bash
-rcurl $AUDIT/v1/chain/head | tee -a /secure/anchors/audit-heads.log
-```
-
-To audit later: verify from the previous anchor's `seq + 1` to the new anchor's `seq`, and compare the returned `head`/last hash with what you stored. If the service was rewound and re-filled, the recorded hash for that `seq` will differ.
 
 ## Checkpoints after retention
 

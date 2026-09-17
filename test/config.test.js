@@ -11,7 +11,26 @@ test('Config: defaults and key roles', () => {
   assert.equal(c.maxBatch, 500);
   assert.deepEqual(c.apiKeys.map((k) => [k.id, k.role]), [['shop', 'readwrite'], ['console', 'read'], ['worker', 'write']]);
   assert.deepEqual(c.redactKeys, Config.DEFAULT_REDACT_KEYS);
+  assert.equal(c.anchorPrivateKeyPath, null, 'anchors are off by default — additive, not required');
+  assert.equal(c.anchorPreviousPublicKeyPath, null);
+  assert.equal(c.anchorIntervalMin, 60);
+  assert.equal(c.anchorWebhookUrl, null);
+  assert.deepEqual(c.outboundTarget, { allowHttp: false, allowPrivate: false, allowedHosts: [] });
   assert.ok(Object.isFrozen(c));
+});
+
+test('Config: anchors', () => {
+  const withKey = Config.fromEnv(testEnv({ ANCHOR_PRIVATE_KEY_PATH: './keys/anchor-private.pem' }));
+  assert.equal(withKey.anchorPrivateKeyPath, './keys/anchor-private.pem');
+  const withRotation = Config.fromEnv(testEnv({ ANCHOR_PRIVATE_KEY_PATH: './keys/anchor-private.pem', ANCHOR_PREVIOUS_PUBLIC_KEY_PATH: './keys/anchor-2026-public.pem' }));
+  assert.equal(withRotation.anchorPreviousPublicKeyPath, './keys/anchor-2026-public.pem');
+  assert.throws(
+    () => Config.fromEnv(testEnv({ ANCHOR_WEBHOOK_URL: 'https://collector.example.com/anchors' })),
+    (/** @type {any} */ e) => e instanceof ConfigError && /requires ANCHOR_PRIVATE_KEY_PATH/.test(e.message),
+    'ANCHOR_WEBHOOK_URL alone, with anchors otherwise off, is refused rather than silently ignored',
+  );
+  const withWebhook = Config.fromEnv(testEnv({ ANCHOR_PRIVATE_KEY_PATH: './keys/anchor-private.pem', ANCHOR_WEBHOOK_URL: 'https://collector.example.com/anchors' }));
+  assert.equal(withWebhook.anchorWebhookUrl, 'https://collector.example.com/anchors');
 });
 
 test('Config: redact keys normalised, "-" disables', () => {

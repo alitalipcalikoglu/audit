@@ -1,3 +1,5 @@
+import { generateKeyPairSync } from 'node:crypto';
+import { AnchorSigner } from '../src/crypto/anchor-signer.js';
 import { Config } from '../src/config.js';
 import { Database } from '../src/db.js';
 
@@ -26,6 +28,17 @@ export function memoryDb() {
 }
 
 /**
+ * A fresh in-memory Ed25519 signer, no files touched — for tests that don't specifically exercise
+ * `AnchorSigner.fromFiles`/`fromPublicFiles`.
+ * @param {{ withPrevious?: boolean }} [o]
+ */
+export function testAnchorSigner({ withPrevious = false } = {}) {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const previous = withPrevious ? generateKeyPairSync('ed25519') : null;
+  return new AnchorSigner({ privateKey, publicKey, previousPublicKey: previous?.publicKey ?? null });
+}
+
+/**
  * @param {Partial<import('../src/types.js').EventRecord>} [o]
  * @returns {import('../src/types.js').EventRecord}
  */
@@ -51,8 +64,9 @@ export function record(o = {}) {
 /**
  * Fully wired Fastify app over an in-memory database.
  * @param {Record<string, string>} [overrides]
+ * @param {import('../src/crypto/anchor-signer.js').AnchorSigner|null} [anchorSigner]
  */
-export async function buildApp(overrides) {
+export async function buildApp(overrides, anchorSigner = null) {
   const { AuditService } = await import('../src/domain/audit-service.js');
   const { AuditApi } = await import('../src/http/audit-api.js');
   const { Redactor } = await import('../src/redactor.js');
@@ -63,8 +77,9 @@ export async function buildApp(overrides) {
   const service = new AuditService({
     events, redactor: new Redactor(config.redactKeys),
     options: { maxBatch: config.maxBatch, metaMaxBytes: config.metaMaxBytes, clockSkewMs: config.clockSkewSec * 1000, verifyMaxRows: config.verifyMaxRows },
+    anchorSigner,
   });
-  const app = await new AuditApi({ config, service, events, db }).build();
+  const app = await new AuditApi({ config, service, events, db, anchorSigner }).build();
   await app.ready();
   return { app, db, events, service, config };
 }

@@ -51,7 +51,7 @@ docker run -d -p 3005:3005 -v audit-data:/data --env-file .env atc-audit
 
 ## Logs
 
-JSON lines. `Authorization` is redacted. Security-relevant lines: `readiness check failed` (warn), `retention purge removed events` (info, with `deleted` and `checkpointSeq`), `maintenance failed` (error).
+JSON lines. `Authorization` is redacted. Security-relevant lines: `readiness check failed` (warn), `retention purge removed events` (info, with `deleted` and `checkpointSeq`), `maintenance failed` (error), and — when [chain anchors](chain-anchors.md) are configured — `chain anchor written` (info, with `seq`), `anchoring failed` (error), `anchor webhook push failed` (warn — the anchor itself is unaffected).
 
 ## Backups
 
@@ -59,7 +59,7 @@ JSON lines. `Authorization` is redacted. Security-relevant lines: `readiness che
 sqlite3 data/audit.db ".backup 'audit-$(date +%F).db'"
 ```
 
-Store the daily [chain head](chain-verification.md) with the backup; restoring a backup and verifying against that head proves the restored log is complete.
+Store the daily [chain head](chain-verification.md) with the backup; restoring a backup and verifying against that head proves the restored log is complete. If [chain anchors](chain-anchors.md) are configured, also back up `keys/` (the anchor signing key pair) — `stack backup` from the workspace root does both together.
 
 ## Capacity
 

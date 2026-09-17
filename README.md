@@ -39,7 +39,8 @@ npm run typecheck
 - **An event** is `action` (`auth.login`, `order.create`), `outcome` (`success`/`failure`/`denied`), `actor` and `target` (`{ type, id, name? }`), `ip`, `userAgent`, `requestId`, free-form `meta`, and `at`. The service adds `source`, `seq`, `receivedAt`, `prevHash`, `hash`.
 - **Source is the key.** Callers authenticate with `Authorization: Bearer <secret>` from `AUDIT_API_KEYS`; the key's id is recorded as `source`. A caller cannot write events under another service's name.
 - **Roles.** Keys are `write` (producers), `read` (dashboards, exporters) or `readwrite`.
-- **Hash chain.** `hash = SHA-256(prevHash + "\n" + canonical JSON of the event)`. Editing, removing or reordering a stored event breaks every later hash; `GET /v1/chain/verify` recomputes and reports the first broken position. Anchor `GET /v1/chain/head` externally to detect a full rewrite.
+- **Hash chain.** `hash = SHA-256(prevHash + "\n" + canonical JSON of the event)`. Editing, removing or reordering a stored event breaks every later hash; `GET /v1/chain/verify` recomputes and reports the first broken position.
+- **Signed anchors (optional).** With `ANCHOR_PRIVATE_KEY_PATH` set, a periodic job signs the current chain head (Ed25519) and records it in `anchors`; `verify()` checks any anchor in range against both the recomputed hash and its signature. See "Chain anchors" below.
 - **Idempotent writes.** An optional client `id` (UUID) makes retries safe: the same `id` from the same source returns the stored event instead of a duplicate.
 - **Redaction.** Values under keys like `password`, `token`, `authorization`, `cardNumber` are replaced with `[REDACTED]` inside `meta` before hashing and storage (`REDACT_KEYS`).
 - **Retention without gaps.** `RETENTION_DAYS` purges only a prefix of the sequence and keeps a checkpoint hash, so the remaining chain still verifies.
@@ -57,7 +58,10 @@ Errors are JSON: `{ "error": { "code", "message", "details?" } }`.
 | GET | `/v1/events/:id` | read | One event. |
 | GET | `/v1/events/export` | read | Same filters, oldest first, streamed as `format=ndjson` (default) or `csv`, capped by `EXPORT_MAX_ROWS`. |
 | GET | `/v1/chain/head` | read | `{ seq, hash }` of the newest event. |
-| GET | `/v1/chain/verify` | read | Recompute the chain over `fromSeq..toSeq` (default all, ≤ `VERIFY_MAX_ROWS`). |
+| GET | `/v1/chain/verify` | read | Recompute the chain over `fromSeq..toSeq` (default all, ≤ `VERIFY_MAX_ROWS`); also checks any anchor in range, if anchors are configured. |
+| GET | `/v1/chain/anchors` | read | Anchors, newest first (`limit` ≤ 200, `beforeSeq`). |
+| GET | `/v1/chain/anchors/latest` | read | Most recent anchor; `404` if none written yet. |
+| GET | `/.well-known/audit-anchor-key` | none | Current (and previous, during rotation) Ed25519 public key, PEM — verify an anchor with no database and no private key. `404` when anchors are not configured. |
 | GET | `/v1/stats` | read | Window aggregates for `hours` (default 24): outcomes, sources, top actions, actors, failures. |
 | GET | `/metrics` | read | Prometheus text: totals, per source, last hour, oldest age, head seq, database size, uptime. |
 
@@ -99,6 +103,52 @@ All settings come from environment variables and are validated at startup. See [
 - Redaction is a safety net for accidental secrets in `meta`, not a substitute for not sending them.
 - Container runs as the unprivileged `node` user.
 
+## Chain anchors
+
+Optional, off by default (`ANCHOR_PRIVATE_KEY_PATH` unset). A periodic job (`ANCHOR_INTERVAL_MIN`,
+default 60) signs the current chain head — `{ seq, hash, at }`, Ed25519 (`node:crypto`, no
+dependency) — and records it in `anchors`. `GET /v1/chain/verify` then also checks every anchor in
+its range against the hash it just recomputed for that seq (catches a tampered or forged anchor row
+even if it doesn't check any live events itself) and the signature (catches a forged/corrupted
+signature or one from a key this service doesn't recognise). Skips writing when the head hasn't
+advanced since the last anchor — nothing new to attest to.
+
+**Generate a key pair:** `npm run anchor-keygen -- keys/anchor` (writes `keys/anchor-private.pem`,
+mode `0600`, and `keys/anchor-public.pem`; refuses to overwrite). Point `ANCHOR_PRIVATE_KEY_PATH` at
+the private key; the service derives its own public key from it — the public file is for you to
+publish, this service never reads it back.
+
+**Verifying independently of this service:** `GET /.well-known/audit-anchor-key` returns the current
+public key (and the previous one, during a rotation) as PEM, with each one's `keyId`. Given that,
+an anchor's own fields (`seq`, `hash`, `at`, `keyId`, `signature`), and `node:crypto`'s `verify(null,
+canonicalPayload, publicKey, signature)`, an external verifier needs neither this service's database
+nor its private key — `AnchorSigner.fromPublicFiles` in this repo is exactly that, usable standalone.
+
+**Key rotation:** generate a new pair under a new name, point `ANCHOR_PRIVATE_KEY_PATH` at it and
+`ANCHOR_PREVIOUS_PUBLIC_KEY_PATH` at the old public key, restart. New anchors sign with the new key;
+old anchors keep verifying against the previous key as long as that file stays configured. Remove
+`ANCHOR_PREVIOUS_PUBLIC_KEY_PATH` once you no longer need to verify anchors from before the rotation
+— removing it earlier makes every anchor signed under the old key unverifiable by this service (its
+`GET /v1/chain/verify` reports "unrecognised key"), though the signatures themselves remain valid
+against the old public key file if you kept a copy.
+
+**External anchoring — what `ANCHOR_WEBHOOK_URL` does and does not give you.** Setting it makes
+`Anchorer` also `POST` each anchor to that URL, best-effort (a failure is logged, never blocks or
+invalidates the anchor, which is already durably written to this service's own database first). This
+is genuinely *a copy landing somewhere outside this service's own `DATA_DIR`* — not the SQLite file,
+not a second file in the same directory, which is not an external trust boundary at all (anyone who
+can tamper with the database can tamper with a second local file the same way, in the same
+transaction, undetected). What it is **not**, automatically, is independent corroboration: if the
+same operator (or the same compromised credentials) controls both this service and whatever answers
+at `ANCHOR_WEBHOOK_URL`, an attacker who can rewrite the chain here can rewrite the copy there too,
+in sync, and the anchor "confirms" a rewritten history just as confidently as a real one. Genuine
+external trust needs a receiving system operated independently of whoever operates this service —
+a separate team, a separate credential boundary, ideally a separate organisation (a public
+transparency log, a customer's own system, a third-party attestation service). This codebase does
+not provide, and does not claim to provide, such a destination; `ANCHOR_WEBHOOK_URL` is the
+mechanism to reach one you already trust, not a source of trust by itself. There is no built-in
+"external" destination and none is faked here.
+
 ## Code layout
 
 Class-based; dependencies are injected through constructors, `src/application.js` is the composition root.
@@ -115,13 +165,16 @@ Class-based; dependencies are injected through constructors, `src/application.js
 | `AuditError` | `src/domain/errors.js` | Error codes and HTTP statuses |
 | `AuditApi`, `ApiKeyAuth`, `Schemas`, `Views`, `Exporter` | `src/http/` | Fastify routes, roles, shapes, streaming export |
 | `Maintenance` | `src/maintenance.js` | Hourly retention purge |
+| `AnchorSigner` | `src/crypto/anchor-signer.js` | Ed25519 sign/verify for chain anchors, key rotation |
+| `Anchorer` | `src/anchorer.js` | Periodic job: sign and record an anchor over the current head |
+| `AnchorWebhook` | `src/anchor-webhook.js` | Optional best-effort external push of each anchor |
+| `AnchorKeyGenerator` | `scripts/anchor-keygen.js` | Anchor signing key pair |
 
 ## Out of scope by design
 
 - Alerting and forwarding (webhooks on `denied` events, SIEM push): consume `/v1/events` or `/v1/events/export` from your alerting tool, or schedule exports.
 - Full-text search inside `meta`: index the identifiers you filter on as `actor`/`target`/`requestId`; run ad-hoc analysis on exports.
 - Multi-writer or clustered storage: one process per SQLite file keeps the chain linear. Run one instance per environment.
-- Digital signatures over the chain: the hash chain plus an externally anchored head covers tampering; signing keys would need their own management.
 
 ## Scaling model
 
@@ -134,8 +187,9 @@ for.
 
 Accepts an inbound `X-Request-Id` unconditionally (an internal service, reached only from other
 services) and logs it via Fastify's default request logging. Does not parse or forward
-`traceparent` (it makes no outbound calls). `/metrics` is entirely database-derived — nothing here
-resets on restart.
+`traceparent`; the one outbound call this service can make — `ANCHOR_WEBHOOK_URL`, when configured
+— does not carry one either, since it posts a signed anchor record, not a request being proxied.
+`/metrics` is entirely database-derived — nothing here resets on restart.
 
 ## Backup / restore
 
@@ -145,12 +199,18 @@ backup is detectable (`GET /v1/chain/verify` will report a gap) rather than sile
 consistently alongside the rest of the stack — audit is not itself included in its own backup scope
 beyond its database. On every start, before applying a pending migration to an existing database,
 the service itself also snapshots the file to `DB_PATH.pre-v<N>-<timestamp>` (directory overridable
-with `DB_BACKUP_DIR`) — a manual last resort if `stack restore` is unavailable.
+with `DB_BACKUP_DIR`) — a manual last resort if `stack restore` is unavailable. If anchors are
+configured, back up `keys/` (the anchor signing key pair, and the previous public key during a
+rotation) alongside the database, the same as `auth` backs up its JWT keys — losing the private key
+means no *new* anchor can ever be signed under that `keyId` again (generate a fresh pair and treat
+it as a rotation), though every anchor already written and verified stays valid.
 
 **Rollback limitations:** none of the migrations are reversible; to roll back, restore the
 pre-migration copy (or a `stack backup` snapshot taken before the upgrade) and run the previous
 version of this service against it. A restore rewinds the chain — always re-run `/v1/chain/verify`
-afterward.
+afterward; if it rewinds past the most recent anchor(s), those anchors now describe a head that no
+longer exists — `verify()` only ever checks anchors inside the range you ask it to check, so this is
+visible (the anchor simply won't be in range after a rewind to before it), not silently wrong.
 
 See [docs/READINESS.md](docs/READINESS.md) for the full contract.
 

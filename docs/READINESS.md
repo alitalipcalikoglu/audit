@@ -8,14 +8,20 @@ export, and retention with a checkpoint so a pruned chain stays independently ve
 
 ## Dependencies
 
-None. Every other service calls *this* one; audit calls nothing.
+None required. Every other service calls *this* one; audit's only optional outbound call is
+`ANCHOR_WEBHOOK_URL` (best-effort external push of a signed anchor — see "Chain anchors" in
+README.md), which is off unless explicitly configured and never gates any request this service
+serves.
 
 ## Persistence
 
 SQLite (`DB_PATH`, default `./data/audit.db`): `events` (append-only, `UNIQUE(source, client_id)`
-for idempotent ingest, indexed for every filter field) and `checkpoints` (one row per retention
-purge, holding the hash of the last row deleted). Same migration mechanism as every service
-(`user_version`, one transaction per migration, WAL, `synchronous=NORMAL`).
+for idempotent ingest, indexed for every filter field), `checkpoints` (one row per retention purge,
+holding the hash of the last row deleted), and `anchors` (Stage 4, schema v2 — one row per signed
+periodic checkpoint of the chain head: `seq PRIMARY KEY`, `hash`, `at`, `key_id`, `signature`; empty
+unless `ANCHOR_PRIVATE_KEY_PATH` is set). Same migration mechanism as every service (`user_version`,
+one transaction per migration, WAL, `synchronous=NORMAL`) — the v1→v2 migration that adds `anchors`
+is this service's first real schema migration since the Stage 3 mechanism was built.
 
 ## Health endpoint
 
@@ -27,8 +33,10 @@ purge, holding the hash of the last row deleted). Same migration mechanism as ev
 
 ## Graceful shutdown
 
-SIGTERM/SIGINT → stop the hourly maintenance timer → `app.close()` (an in-flight export finishes
-streaming) → close the database → exit. Force-exit at 30 s; PM2 `kill_timeout` 35 000 ms.
+SIGTERM/SIGINT → stop the hourly maintenance timer → stop the anchor timer, if anchors are
+configured (an anchor mid-flight is not interrupted — it is synchronous DB work — only the *next*
+scheduled tick is what "stop" prevents) → `app.close()` (an in-flight export finishes streaming) →
+close the database → exit. Force-exit at 30 s; PM2 `kill_timeout` 35 000 ms.
 
 ## Resource limits
 
@@ -39,13 +47,17 @@ call), `META_MAX_BYTES` (default 8192, per event's `meta` field after canonicali
 
 ## Timeouts
 
-None of its own — audit makes no outbound calls, so there is nothing to time out on its side beyond
-the standard per-request handling.
+None of its own on the receiving side. The one outbound call this service can make —
+`ANCHOR_WEBHOOK_URL`, if configured — times out at `ANCHOR_WEBHOOK_TIMEOUT_MS` (default 5000),
+service-core's standard `HttpCaller` behaviour.
 
 ## Retry policy
 
-Not applicable: audit is a pure receiver with no outbound calls or background jobs that retry.
-Callers forwarding events to it (every other service's `net/audit-client.js`) own their own retry.
+Not applicable to ingest: audit is a pure receiver; callers forwarding events to it (every other
+service's `net/audit-client.js`) own their own retry. The anchor webhook push is not retried within
+one `Anchorer` tick either — a failure is logged and the next scheduled anchor (`ANCHOR_INTERVAL_MIN`
+later, or sooner if the head advances again) is the next attempt; the anchor itself is never lost
+regardless, since it's already durably recorded before the push is even attempted.
 
 ## Idempotency
 
@@ -59,12 +71,16 @@ effects to repeat.
 
 The entire chain is the thing to protect — losing it loses the audit history it exists to keep, and
 a restore from an incomplete backup is detectably incomplete (chain verification will report a gap)
-rather than silently wrong, which is a useful property but not a substitute for backing it up.
+rather than silently wrong, which is a useful property but not a substitute for backing it up. If
+anchors are configured, `keys/` (the Ed25519 signing key pair, and the previous public key during a
+rotation) is backed up alongside the database — see README.md's "Chain anchors".
 
 ## Restore
 
 Restore the database file and restart; run `GET /v1/chain/verify` afterward to confirm the restored
-chain is intact from its genesis or its most recent checkpoint.
+chain is intact from its genesis or its most recent checkpoint. If a restore rewinds past the most
+recent anchor(s), those simply fall outside any range `verify()` is asked to check going forward —
+visible by their absence, not a false pass.
 
 ## Metrics
 
@@ -84,7 +100,8 @@ fully emit (`service`, `version`, `traceId`).
 
 Accepts an inbound `X-Request-Id` unconditionally (internal service, reached only from other
 services on a private network — see OBSERVABILITY.md's trust-boundary discussion). Does not yet
-parse or log `traceparent`; not applicable since it makes no outbound calls to forward one on.
+parse or log `traceparent`; the anchor webhook push (when configured) does not carry one either — it
+posts a signed anchor record, not a request being proxied on behalf of an inbound caller.
 
 ## Security model
 
@@ -95,6 +112,24 @@ taken from the request body — so a caller cannot forge another service's ident
 payload does not end up in the immutable log either. No rotation beyond listing a second key id
 alongside the old one and removing the old one later (the same pattern every service's plain
 `id:secret` key list supports).
+
+**Chain anchors (Stage 4):** Ed25519 (`node:crypto`), private key never stored in the database
+(`ANCHOR_PRIVATE_KEY_PATH`, PEM file, mode 0600). `keyId` (first 16 hex chars of the SHA-256 of the
+public key's SPKI DER) travels with every anchor, so verification — including from a completely
+external tool with only a published public key, see `AnchorSigner.fromPublicFiles` — never needs to
+guess which key signed it. `verify()` checks an anchor's signature *and* its stored hash against the
+hash it independently recomputes for that same seq from the live chain, so a tampered anchor row is
+caught even when the live events around it are untouched, and a tampered live event is still caught
+by the pre-existing hash-chain check regardless of whether anchors are configured at all — the two
+checks are independent, neither weakens the other. What anchoring does **not** protect against: an
+attacker with write access to the database *and* the anchor private key can rewrite history and
+re-sign it consistently — the private key is protection against a party who can alter the database
+but not the key file (a narrower, still real, threat model: e.g. a backup restored from a compromised
+host, a SQL-injection-only compromise, a misconfigured read path that became writable). Anchoring is
+detection of unauthorized tampering by a party without the signing key, not prevention of a fully
+compromised host, and not (by itself) proof to a third party unless that third party received the
+anchor through a channel `ANCHOR_WEBHOOK_URL` and this operator do not both control — see README.md's
+"External anchoring" for exactly what that option does and does not give you.
 
 ## Scaling model
 
@@ -123,3 +158,13 @@ unsupported, from several racing each other.
 - Retention purge (`Maintenance`, hourly) deletes only a `seq` prefix and records a checkpoint —
   `/v1/chain/verify` from before that checkpoint correctly reports "no trusted predecessor" rather
   than false-passing; verifying from at or after the checkpoint still works.
+- `ANCHOR_WEBHOOK_URL` destination unreachable, refused by the SSRF guard, or timing out: the anchor
+  is unaffected — it was already written and signed locally before the push was attempted. `Anchorer`
+  logs a warning and moves on; the next scheduled tick (or the next real head advance) is the next
+  attempt. Nothing about ingest, query, verification or any other endpoint is affected.
+- `ANCHOR_PRIVATE_KEY_PATH` set but the file is missing/unreadable/not a valid key: fails at startup
+  (`AnchorSigner.fromFiles` throws before `Lifecycle.install`), the same fail-fast treatment as a bad
+  `TLS_CERT_PATH` — never starts silently without anchors when they were supposed to be on.
+- A verifier configured with the wrong public key, or missing `ANCHOR_PREVIOUS_PUBLIC_KEY_PATH` after
+  a rotation: `verify()` reports the affected anchor(s) as invalid ("unrecognised key") rather than
+  silently skipping them or reporting `ok: true` — see "Chain anchors" in README.md.

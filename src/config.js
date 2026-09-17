@@ -1,4 +1,4 @@
-import { ConfigError, EnvReader, parseApiKeys } from '@atc-web/service-core/config';
+import { ConfigError, EnvReader, parseApiKeys, parseTarget } from '@atc-web/service-core/config';
 
 /** @typedef {import('./types.js').ApiKey} ApiKey */
 /** @typedef {import('./types.js').KeyRole} KeyRole */
@@ -29,6 +29,12 @@ export class Config {
     this.clockSkewSec = v.clockSkewSec;
     this.exportMaxRows = v.exportMaxRows;
     this.verifyMaxRows = v.verifyMaxRows;
+    this.anchorPrivateKeyPath = v.anchorPrivateKeyPath;
+    this.anchorPreviousPublicKeyPath = v.anchorPreviousPublicKeyPath;
+    this.anchorIntervalMin = v.anchorIntervalMin;
+    this.anchorWebhookUrl = v.anchorWebhookUrl;
+    this.anchorWebhookTimeoutMs = v.anchorWebhookTimeoutMs;
+    this.outboundTarget = v.outboundTarget;
     Object.freeze(this);
   }
 
@@ -42,6 +48,10 @@ export class Config {
     const certPath = r.optional('TLS_CERT_PATH');
     const keyPath = r.optional('TLS_KEY_PATH');
     if (Boolean(certPath) !== Boolean(keyPath)) throw new ConfigError('TLS_CERT_PATH and TLS_KEY_PATH must be set together');
+
+    const anchorWebhookUrl = r.optional('ANCHOR_WEBHOOK_URL') || null;
+    const anchorPrivateKeyPath = r.optional('ANCHOR_PRIVATE_KEY_PATH') || null;
+    if (anchorWebhookUrl && !anchorPrivateKeyPath) throw new ConfigError('ANCHOR_WEBHOOK_URL requires ANCHOR_PRIVATE_KEY_PATH — there is nothing to push without anchors being enabled');
 
     return new Config({
       port: r.integer('PORT', 3005, { min: 0, max: 65535 }),
@@ -61,6 +71,12 @@ export class Config {
       clockSkewSec: r.integer('CLOCK_SKEW_SEC', 300, { min: 0, max: 86_400 }),
       exportMaxRows: r.integer('EXPORT_MAX_ROWS', 100_000, { min: 100 }),
       verifyMaxRows: r.integer('VERIFY_MAX_ROWS', 100_000, { min: 100 }),
+      anchorPrivateKeyPath,
+      anchorPreviousPublicKeyPath: r.optional('ANCHOR_PREVIOUS_PUBLIC_KEY_PATH') || null,
+      anchorIntervalMin: r.integer('ANCHOR_INTERVAL_MIN', 60, { min: 1 }),
+      anchorWebhookUrl,
+      anchorWebhookTimeoutMs: r.integer('ANCHOR_WEBHOOK_TIMEOUT_MS', 5_000, { min: 500, max: 30_000 }),
+      outboundTarget: parseTarget(r),
     });
   }
 

@@ -42,5 +42,20 @@ export class Database extends CoreDatabase {
       created_at INTEGER NOT NULL
     );
     `,
+    `
+    -- Signed periodic checkpoints of the chain head (Stage 4). "seq" is the chain head this anchor
+    -- covers, PRIMARY KEY so re-anchoring an unchanged head is a caught conflict, not a duplicate
+    -- row -- Anchorer checks the last anchor's seq first and skips when nothing has advanced.
+    -- "key_id" names which configured signing key (current or previous) produced "signature", so a
+    -- key rotation never orphans older anchors -- see AnchorSigner.
+    CREATE TABLE anchors (
+      seq        INTEGER PRIMARY KEY,
+      hash       TEXT NOT NULL,
+      at         INTEGER NOT NULL,
+      key_id     TEXT NOT NULL,
+      signature  TEXT NOT NULL
+    );
+    CREATE INDEX anchors_at ON anchors (at DESC);
+    `,
   ];
 }

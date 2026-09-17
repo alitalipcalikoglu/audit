@@ -28,13 +28,15 @@ export class AuditApi {
    * @param {AuditService} deps.service
    * @param {import('../store/event-store.js').EventStore} deps.events
    * @param {import('../db.js').Database} deps.db
+   * @param {import('../crypto/anchor-signer.js').AnchorSigner|null} [deps.anchorSigner]
    * @param {import('../types.js').Logger} [deps.logger]
    */
-  constructor({ config, service, events, db, logger }) {
+  constructor({ config, service, events, db, anchorSigner = null, logger }) {
     this.config = config;
     this.service = service;
     this.events = events;
     this.db = db;
+    this.anchorSigner = anchorSigner;
     this.logger = logger;
     this.auth = new ApiKeyAuth(config.apiKeys);
   }
@@ -62,6 +64,15 @@ export class AuditApi {
       if (!reply.hasHeader('cache-control')) reply.header('cache-control', 'no-store');
     });
     registerProbes(app, () => this.db.ping(), { cacheMs: AuditApi.READY_CACHE_MS });
+    app.get('/.well-known/audit-anchor-key', { logLevel: 'warn' }, async (_request, reply) => {
+      if (!this.anchorSigner) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'anchors are not configured on this service' } });
+      reply.header('cache-control', 'public, max-age=300');
+      const signer = this.anchorSigner;
+      return {
+        current: { keyId: signer.keyId, algorithm: 'Ed25519', publicKey: signer.publicKeyPem() },
+        previous: signer.previousKeyId ? { keyId: signer.previousKeyId, algorithm: 'Ed25519', publicKey: signer.previousPublicKeyPem() } : null,
+      };
+    });
     await app.register((api) => this.#registerV1(api), { prefix: '/v1' });
     await app.register((ops) => this.#registerMetrics(ops));
     return app;
@@ -125,6 +136,20 @@ export class AuditApi {
     api.get('/chain/verify', { ...read, schema: { querystring: Schemas.verifyQuery } }, async (request) => {
       const q = /** @type {{ fromSeq?: string, toSeq?: string }} */ (request.query);
       return s.verify({ fromSeq: q.fromSeq ? Number(q.fromSeq) : undefined, toSeq: q.toSeq ? Number(q.toSeq) : undefined });
+    });
+
+    api.get('/chain/anchors', { ...read, schema: { querystring: Schemas.anchorsQuery } }, async (request) => {
+      const q = /** @type {{ limit?: string, beforeSeq?: string }} */ (request.query);
+      const limit = q.limit ? Number(q.limit) : 50;
+      const rows = this.events.anchorsList({ limit: limit + 1, beforeSeq: q.beforeSeq ? Number(q.beforeSeq) : undefined });
+      const items = rows.slice(0, limit);
+      return { items: items.map(Views.anchor), nextBeforeSeq: rows.length > limit ? items.at(-1)?.seq ?? null : null };
+    });
+
+    api.get('/chain/anchors/latest', read, async (_request, reply) => {
+      const a = this.events.latestAnchor();
+      if (!a) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'no anchor has been written yet' } });
+      return { anchor: Views.anchor(a) };
     });
 
     // ---- stats

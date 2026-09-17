@@ -31,6 +31,12 @@
  * @property {number} clockSkewSec       How far in the future a client `at` may be.
  * @property {number} exportMaxRows
  * @property {number} verifyMaxRows
+ * @property {string|null} anchorPrivateKeyPath        PEM, PKCS#8, Ed25519. Anchors are off when null.
+ * @property {string|null} anchorPreviousPublicKeyPath  PEM SPKI of a key being rotated out.
+ * @property {number} anchorIntervalMin
+ * @property {string|null} anchorWebhookUrl
+ * @property {number} anchorWebhookTimeoutMs
+ * @property {{ allowHttp: boolean, allowPrivate: boolean, allowedHosts: string[] }} outboundTarget
  */
 
 /** @typedef {import('./config.js').Config} Config */
@@ -99,6 +105,16 @@
  * @property {number} received_at
  * @property {string} prev_hash
  * @property {string} hash
+ */
+
+/**
+ * A signed periodic checkpoint of the chain head (Stage 4).
+ * @typedef {object} AnchorRow
+ * @property {number} seq        Chain head seq this anchor covers.
+ * @property {string} hash       Chain hash at that seq.
+ * @property {number} at         When the anchor was written, epoch ms.
+ * @property {string} key_id     Which configured signing key produced `signature`.
+ * @property {string} signature  base64url, over `{ seq, hash, at }` — see `AnchorSigner`.
  */
 
 /**

@@ -1,8 +1,14 @@
 /** @typedef {import('../types.js').EventRow} EventRow */
 /** @typedef {import('../types.js').EventFilter} EventFilter */
+/** @typedef {import('../types.js').AnchorRow} AnchorRow */
 
 /** Response shapes and query-to-filter mapping. */
 export class Views {
+  /** @param {AnchorRow} a */
+  static anchor(a) {
+    return { seq: Number(a.seq), hash: a.hash, at: new Date(Number(a.at)).toISOString(), keyId: a.key_id, signature: a.signature };
+  }
+
   /** @param {EventRow} r */
   static event(r) {
     return {

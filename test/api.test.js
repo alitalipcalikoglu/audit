@@ -146,7 +146,7 @@ test('API: chain head, verify, tamper detection', async (t) => {
   const { app, db } = await buildApp();
   t.after(() => app.close());
   const empty = await app.inject({ url: '/v1/chain/verify', headers: bearer(READ_KEY) });
-  assert.deepEqual(json(empty), { ok: true, checked: 0, fromSeq: null, toSeq: null, firstBroken: null, head: { seq: 0, hash: HashChain.GENESIS } });
+  assert.deepEqual(json(empty), { ok: true, checked: 0, fromSeq: null, toSeq: null, firstBroken: null, head: { seq: 0, hash: HashChain.GENESIS }, anchors: { checked: 0, invalid: [] } });
   await app.inject({ method: 'POST', url: '/v1/events/batch', headers: bearer(RW_KEY), payload: { events: [{ action: 'a.b' }, { action: 'a.c' }, { action: 'a.d' }] } });
   const head = json(await app.inject({ url: '/v1/chain/head', headers: bearer(READ_KEY) }));
   assert.equal(head.seq, 3);

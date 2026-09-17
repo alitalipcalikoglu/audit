@@ -8,7 +8,8 @@ Scenario-driven walkthroughs of every feature. Requests to `/v1/*` need `Authori
 | [Batches and idempotency](batch-and-idempotency.md) | Sending many events at once, safe retries with client ids |
 | [Querying events](query.md) | Every filter, prefix search on actions, cursor pagination |
 | [Exporting](export.md) | Streaming NDJSON and CSV for compliance and offline analysis |
-| [Chain verification](chain-verification.md) | What the hash chain proves, verifying it, anchoring the head externally, checkpoints after purges |
+| [Chain verification](chain-verification.md) | What the hash chain proves, verifying it, checkpoints after purges |
+| [Chain anchors](chain-anchors.md) | Signed periodic checkpoints, key rotation, verifying independently with no database, external push |
 | [Dashboard statistics](stats.md) | Window aggregates: outcomes, sources, top actions, actors, failures |
 | [API keys and roles](keys-and-roles.md) | Read, write and readwrite keys; one key per source |
 | [Retention](retention.md) | How old events are removed without breaking verification |

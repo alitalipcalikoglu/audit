@@ -1,5 +1,9 @@
-import { Config } from './config.js';
+import { NetGuard } from '@atc-web/service-core/http';
 import { Lifecycle } from '@atc-web/service-core/lifecycle';
+import { AnchorWebhook } from './anchor-webhook.js';
+import { Anchorer } from './anchorer.js';
+import { Config } from './config.js';
+import { AnchorSigner } from './crypto/anchor-signer.js';
 import { Database } from './db.js';
 import { AuditService } from './domain/audit-service.js';
 import { AuditApi } from './http/audit-api.js';
@@ -17,15 +21,21 @@ export class Application {
     this.config = config;
     this.db = new Database(config.dbPath, { backupDir: config.dbBackupDir });
     this.events = new EventStore(this.db);
+    this.anchorSigner = config.anchorPrivateKeyPath
+      ? AnchorSigner.fromFiles({ privateKeyPath: config.anchorPrivateKeyPath, previousPublicKeyPath: config.anchorPreviousPublicKeyPath })
+      : null;
     this.service = new AuditService({
       events: this.events,
       redactor: new Redactor(config.redactKeys),
       options: { maxBatch: config.maxBatch, metaMaxBytes: config.metaMaxBytes, clockSkewMs: config.clockSkewSec * 1000, verifyMaxRows: config.verifyMaxRows },
+      anchorSigner: this.anchorSigner,
     });
     /** @type {import('fastify').FastifyInstance|null} */
     this.app = null;
     /** @type {Maintenance|null} */
     this.maintenance = null;
+    /** @type {Anchorer|null} */
+    this.anchorer = null;
     /** @type {(reason: string) => Promise<void>} */
     this.shutdown = async () => {};
   }
@@ -45,23 +55,35 @@ export class Application {
 
   async start() {
     const { config } = this;
-    const api = new AuditApi({ config, service: this.service, events: this.events, db: this.db });
+    const api = new AuditApi({ config, service: this.service, events: this.events, db: this.db, anchorSigner: this.anchorSigner });
     const app = await api.build();
     this.app = app;
     this.maintenance = new Maintenance({ events: this.events, log: app.log.child({ component: 'maintenance' }), options: { retentionDays: config.retentionDays } });
+    if (this.anchorSigner) {
+      const webhook = config.anchorWebhookUrl
+        ? new AnchorWebhook({
+          url: config.anchorWebhookUrl,
+          guard: new NetGuard(config.outboundTarget),
+          timeoutMs: config.anchorWebhookTimeoutMs,
+        })
+        : null;
+      this.anchorer = new Anchorer({ service: this.service, webhook, log: app.log.child({ component: 'anchorer' }), options: { intervalMs: config.anchorIntervalMin * 60_000 } });
+    }
     const { shutdown } = Lifecycle.install({
       forceExitMs: 30_000,
       log: app.log,
       steps: [
         () => this.maintenance?.stop(),
+        () => this.anchorer?.stop(),
         () => this.app?.close(),
         () => this.db.close(),
       ],
     });
     this.shutdown = shutdown;
     await app.listen({ port: config.port, host: config.host });
-    app.log.info({ tls: config.tls !== null, head: this.events.head(), sources: config.apiKeys.map((k) => `${k.id}:${k.role}`) }, config.tls ? 'serving HTTPS' : 'serving plain HTTP, terminate TLS at a reverse proxy');
+    app.log.info({ tls: config.tls !== null, head: this.events.head(), sources: config.apiKeys.map((k) => `${k.id}:${k.role}`), anchors: this.anchorSigner ? this.anchorSigner.keyId : 'disabled' }, config.tls ? 'serving HTTPS' : 'serving plain HTTP, terminate TLS at a reverse proxy');
     this.maintenance.start();
+    this.anchorer?.start();
     if (process.send) process.send('ready'); // PM2 wait_ready
   }
 
