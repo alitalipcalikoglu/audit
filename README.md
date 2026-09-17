@@ -123,6 +123,27 @@ Class-based; dependencies are injected through constructors, `src/application.js
 - Multi-writer or clustered storage: one process per SQLite file keeps the chain linear. Run one instance per environment.
 - Digital signatures over the chain: the hash chain plus an externally anchored head covers tampering; signing keys would need their own management.
 
+## Scaling model
+
+Single-node stateful: one process owns the SQLite chain. The append path (`BEGIN IMMEDIATE` around
+reading the current head and inserting) is what keeps the chain from forking within that process;
+running two processes against the same file is not the deployment model this is built or tested
+for.
+
+## Observability
+
+Accepts an inbound `X-Request-Id` unconditionally (an internal service, reached only from other
+services) and logs it via Fastify's default request logging. Does not parse or forward
+`traceparent` (it makes no outbound calls). `/metrics` is entirely database-derived — nothing here
+resets on restart.
+
+## Backup / restore
+
+Back up the database file; the whole point of the chain is that a restore from an incomplete
+backup is detectable (`GET /v1/chain/verify` will report a gap) rather than silently wrong.
+
+See [docs/READINESS.md](docs/READINESS.md) for the full contract.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
