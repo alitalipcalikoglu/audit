@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
-import { createErrorHandler, registerProbes } from '@atc-web/service-core/fastify';
+import { createErrorHandler, registerInfo, registerProbes } from '@atc-web/service-core/fastify';
 import { AuditError } from '../domain/errors.js';
 import { ApiKeyAuth } from './api-key-auth.js';
 import { Exporter } from './exporter.js';
@@ -30,14 +30,16 @@ export class AuditApi {
    * @param {import('../db.js').Database} deps.db
    * @param {import('../crypto/anchor-signer.js').AnchorSigner|null} [deps.anchorSigner]
    * @param {import('../types.js').Logger} [deps.logger]
+   * @param {string} deps.version
    */
-  constructor({ config, service, events, db, anchorSigner = null, logger }) {
+  constructor({ config, service, events, db, anchorSigner = null, logger, version }) {
     this.config = config;
     this.service = service;
     this.events = events;
     this.db = db;
     this.anchorSigner = anchorSigner;
     this.logger = logger;
+    this.version = version;
     this.auth = new ApiKeyAuth(config.apiKeys);
   }
 
@@ -64,6 +66,12 @@ export class AuditApi {
       if (!reply.hasHeader('cache-control')) reply.header('cache-control', 'no-store');
     });
     registerProbes(app, () => this.db.ping(), { cacheMs: AuditApi.READY_CACHE_MS });
+    registerInfo(app, {
+      service: 'audit',
+      version: this.version,
+      capabilities: ['chain-verification', 'anchors', 'export'],
+      schemaVersion: this.db.schemaVersion,
+    });
     app.get('/.well-known/audit-anchor-key', { logLevel: 'warn' }, async (_request, reply) => {
       if (!this.anchorSigner) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'anchors are not configured on this service' } });
       reply.header('cache-control', 'public, max-age=300');

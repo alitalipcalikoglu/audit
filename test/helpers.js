@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from 'node:crypto';
+import { readServiceVersion } from '@atc-web/service-core/fastify';
 import { AnchorSigner } from '../src/crypto/anchor-signer.js';
 import { Config } from '../src/config.js';
 import { Database } from '../src/db.js';
@@ -79,7 +80,7 @@ export async function buildApp(overrides, anchorSigner = null) {
     options: { maxBatch: config.maxBatch, metaMaxBytes: config.metaMaxBytes, clockSkewMs: config.clockSkewSec * 1000, verifyMaxRows: config.verifyMaxRows },
     anchorSigner,
   });
-  const app = await new AuditApi({ config, service, events, db, anchorSigner }).build();
+  const app = await new AuditApi({ config, service, events, db, anchorSigner, version: readServiceVersion(import.meta.url) }).build();
   await app.ready();
   return { app, db, events, service, config };
 }

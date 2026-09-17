@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import { HashChain } from '../src/chain.js';
 import { READ_KEY, RW_KEY, WRITE_KEY, bearer, buildApp } from './helpers.js';
+
+const AUDIT_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 const json = (/** @type {import('light-my-request').Response} */ r) => JSON.parse(r.body);
 
@@ -189,6 +192,18 @@ test('API: stats and metrics', async (t) => {
   assert.match(m.body, /audit_events_by_source\{source="shop"\} 3/);
   assert.match(m.body, /audit_chain_head_seq 4/);
   assert.match(m.body, /audit_db_bytes \d+/);
+});
+
+test('API: info', async (t) => {
+  const { app } = await buildApp();
+  t.after(() => app.close());
+  const info = json(await app.inject({ url: '/v1/info' }));
+  assert.equal(info.service, 'audit');
+  assert.equal(info.version, AUDIT_VERSION);
+  assert.equal(info.apiVersion, 'v1');
+  assert.deepEqual(info.capabilities, ['chain-verification', 'anchors', 'export']);
+  assert.equal(typeof info.schemaVersion, 'number');
+  assert.equal(typeof info.serviceCore, 'string');
 });
 
 test('API: rate limit per key', async (t) => {

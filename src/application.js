@@ -1,3 +1,4 @@
+import { readServiceVersion } from '@atc-web/service-core/fastify';
 import { NetGuard } from '@atc-web/service-core/http';
 import { Lifecycle } from '@atc-web/service-core/lifecycle';
 import { AnchorWebhook } from './anchor-webhook.js';
@@ -19,6 +20,7 @@ export class Application {
   /** @param {Config} config */
   constructor(config) {
     this.config = config;
+    this.version = readServiceVersion(import.meta.url);
     this.db = new Database(config.dbPath, { backupDir: config.dbBackupDir });
     this.events = new EventStore(this.db);
     this.anchorSigner = config.anchorPrivateKeyPath
@@ -55,7 +57,7 @@ export class Application {
 
   async start() {
     const { config } = this;
-    const api = new AuditApi({ config, service: this.service, events: this.events, db: this.db, anchorSigner: this.anchorSigner });
+    const api = new AuditApi({ config, service: this.service, events: this.events, db: this.db, anchorSigner: this.anchorSigner, version: this.version });
     const app = await api.build();
     this.app = app;
     this.maintenance = new Maintenance({ events: this.events, log: app.log.child({ component: 'maintenance' }), options: { retentionDays: config.retentionDays } });

@@ -45,6 +45,14 @@ npm run typecheck
 - **Redaction.** Values under keys like `password`, `token`, `authorization`, `cardNumber` are replaced with `[REDACTED]` inside `meta` before hashing and storage (`REDACT_KEYS`).
 - **Retention without gaps.** `RETENTION_DAYS` purges only a prefix of the sequence and keeps a checkpoint hash, so the remaining chain still verifies.
 
+## Boundaries
+
+**Purpose:** durable, tamper-evident log of the platform's write and security events.
+
+**Responsibilities:** event ingestion; hash-chain integrity; periodic signed anchors; filtered export; anchor key rotation.
+
+**Non-responsibilities:** audit ≠ primary business datastore — no service in this workspace reads its own state back out of audit; it is a write-optimized, append-only sink, not a query/reporting store for business data. It does not decide whether an action was allowed, only records that it happened.
+
 ## API
 
 Errors are JSON: `{ "error": { "code", "message", "details?" } }`.
