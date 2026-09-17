@@ -59,7 +59,7 @@ Errors are JSON: `{ "error": { "code", "message", "details?" } }`.
 
 | Method | Path | Role | Purpose |
 |---|---|---|---|
-| GET | `/health`, `/ready` | none | Liveness; readiness (database answers, cached 10 s). |
+| GET | `/health`, `/ready`, `/v1/info` | none | Liveness; readiness (database answers, cached 10 s); service identity (version, API version, capabilities, schema version, service-core version). |
 | POST | `/v1/events` | write | Record one event. `201`, or `200` with `duplicate: true`. |
 | POST | `/v1/events/batch` | write | `{ events: [...] }`, up to `MAX_BATCH`, one transaction. |
 | GET | `/v1/events` | read | Newest first; filters `source`, `action`, `actionPrefix`, `outcome`, `actorType`, `actorId`, `targetType`, `targetId`, `ip`, `requestId`, `from`, `to`; `limit` ≤ 200, `cursor`. |
