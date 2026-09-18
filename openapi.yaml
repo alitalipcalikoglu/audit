@@ -1,0 +1,1046 @@
+openapi: 3.1.0
+info:
+  title: audit
+  version: 1.0.0
+  description: >-
+    Central append-only audit log. Services push events over HTTP; the log keeps a
+    tamper-evident SHA-256 hash chain over stored events, offers filtered queries, NDJSON/CSV
+    export, retention and optional Ed25519-signed chain anchors.
+  license:
+    name: MIT
+
+servers:
+  - url: /
+    description: >-
+      Base path of a running audit instance (PORT env var, default 3005). This document uses
+      paths relative to that instance's own origin.
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: events
+    description: Event ingest and query.
+  - name: chain
+    description: Hash-chain head, verification and signed anchors.
+  - name: stats
+    description: Aggregate counters.
+  - name: operational
+    description: Health, readiness, service info and metrics.
+
+paths:
+  /health:
+    get:
+      operationId: audit.health.get
+      tags: [operational]
+      summary: Liveness probe.
+      description: Always returns `200` once the process is up. No dependency check.
+      security: []
+      x-stack-visibility: public
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /ready:
+    get:
+      operationId: audit.ready.get
+      tags: [operational]
+      summary: Readiness probe.
+      description: >-
+        Runs `db.ping()`, cached for 10 seconds. `503` when the database is unreachable.
+      security: []
+      x-stack-visibility: public
+      responses:
+        '200':
+          description: Dependencies are healthy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: A dependency check failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyUnavailable'
+
+  /v1/info:
+    get:
+      operationId: audit.info.get
+      tags: [operational]
+      summary: Service identity and capabilities.
+      description: >-
+        `capabilities` is a static, hardcoded list for this service — it always includes
+        `"anchors"` even when chain anchoring is not configured for this instance (no
+        `ANCHOR_PRIVATE_KEY_PATH`). Do not treat it as a live, instance-accurate feature flag;
+        probe `GET /.well-known/audit-anchor-key` (200 vs 404) to learn whether anchoring is
+        actually enabled on this instance.
+      security: []
+      x-stack-visibility: public
+      responses:
+        '200':
+          description: Service info.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Info'
+
+  /.well-known/audit-anchor-key:
+    get:
+      operationId: audit.anchorKey.get
+      tags: [chain]
+      summary: Current (and previous) anchor-signing public key.
+      description: >-
+        Registered outside the `/v1` prefix and outside the API-key auth boundary — this route
+        is never gated by the `Authorization` header, even though it is not itself under `/v1`.
+        Returns `404` when this instance has no anchor signer configured
+        (`ANCHOR_PRIVATE_KEY_PATH` unset). Response is cacheable for 300 seconds.
+      security: []
+      x-stack-visibility: public
+      responses:
+        '200':
+          description: The signer's current and (if rotated) previous public key.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: 'public, max-age=300'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnchorKeyInfo'
+        '404':
+          description: Anchoring is not configured on this instance.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /metrics:
+    get:
+      operationId: audit.metrics.get
+      tags: [operational]
+      summary: Prometheus text-format metrics.
+      description: Authenticated (`read`), not subject to the `/v1` rate limiter.
+      x-required-role: read
+      x-stack-visibility: operational
+      responses:
+        '200':
+          description: Prometheus exposition text.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/events:
+    post:
+      operationId: audit.events.create
+      tags: [events]
+      summary: Ingest one event.
+      description: >-
+        Writer identity (`source`) is the caller's own API key id, never client-supplied.
+        A `clientId` (request body `id`) already seen for this source is treated as a duplicate:
+        the existing stored row is returned unchanged with `200` instead of a new `201` row, and
+        `duplicate: true`. `Location` is set to the stored event's URL in both cases.
+      x-required-role: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventCreate'
+      responses:
+        '201':
+          description: New event stored.
+          headers:
+            Location:
+              description: URL of the stored event (`/v1/events/{id}`).
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventCreateResponse'
+        '200':
+          description: >-
+            Duplicate: an event with this `clientId` was already stored for this source. The
+            existing row is returned, `duplicate: true`.
+          headers:
+            Location:
+              description: URL of the existing stored event (`/v1/events/{id}`).
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventCreateResponse'
+        '400':
+          description: Validation failed, the event is malformed, or its timestamp is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                validationFailed:
+                  value: { error: { code: VALIDATION_FAILED, message: 'body/action must match pattern' } }
+                invalidEvent:
+                  value: { error: { code: INVALID_EVENT, message: 'events[0].ip is not an IP address' } }
+                timestampInvalid:
+                  value: { error: { code: TIMESTAMP_INVALID, message: 'events[0].at is not a valid ISO 8601 timestamp' } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          description: The event's `meta` object is larger than the configured limit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                metaTooLarge:
+                  value: { error: { code: META_TOO_LARGE, message: 'events[0].meta is 9000 bytes, limit 8192' } }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+    get:
+      operationId: audit.events.list
+      tags: [events]
+      summary: List events, newest first.
+      description: Keyset pagination via `cursor`/`nextCursor` (opaque, base64url `at:seq`).
+      x-required-role: read
+      parameters:
+        - $ref: '#/components/parameters/SourceFilter'
+        - $ref: '#/components/parameters/ActionFilter'
+        - $ref: '#/components/parameters/ActionPrefixFilter'
+        - $ref: '#/components/parameters/OutcomeFilter'
+        - $ref: '#/components/parameters/ActorTypeFilter'
+        - $ref: '#/components/parameters/ActorIdFilter'
+        - $ref: '#/components/parameters/TargetTypeFilter'
+        - $ref: '#/components/parameters/TargetIdFilter'
+        - $ref: '#/components/parameters/IpFilter'
+        - $ref: '#/components/parameters/RequestIdFilter'
+        - $ref: '#/components/parameters/FromFilter'
+        - $ref: '#/components/parameters/ToFilter'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/CursorParam'
+      responses:
+        '200':
+          description: A page of events.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventList'
+        '400':
+          description: A query parameter failed validation, or `cursor` is not a valid cursor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                invalidCursor:
+                  value: { error: { code: INVALID_CURSOR, message: 'cursor is not valid' } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/events/batch:
+    post:
+      operationId: audit.events.createBatch
+      tags: [events]
+      summary: Ingest up to 5000 events in one call.
+      description: >-
+        Always `201`, even when every item in the batch turns out to be a duplicate — the batch
+        response distinguishes `accepted`/`duplicates` counts and per-item `duplicate` flags
+        instead of the single-event route's `200`/`201` split. No `Location` header.
+      x-required-role: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventBatchCreate'
+      responses:
+        '201':
+          description: Batch processed (accepted and/or duplicate items).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventBatchCreateResponse'
+        '400':
+          description: Validation failed, an event is malformed, or its timestamp is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          description: >-
+            The batch has more than the configured `MAX_BATCH` events, or one item's `meta`
+            exceeds the configured byte limit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                batchTooLarge:
+                  value: { error: { code: BATCH_TOO_LARGE, message: 'at most 500 events per request' } }
+                metaTooLarge:
+                  value: { error: { code: META_TOO_LARGE, message: 'events[3].meta is 9000 bytes, limit 8192' } }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/events/export:
+    get:
+      operationId: audit.events.export
+      tags: [events]
+      summary: Stream matching events as NDJSON or CSV.
+      description: >-
+        Oldest first, streamed without buffering the full result server-side, capped at
+        `EXPORT_MAX_ROWS` rows (reported via the `X-Export-Max-Rows` response header). Same
+        filters as `GET /v1/events`, minus pagination (`limit`/`cursor` do not apply here).
+      x-required-role: read
+      parameters:
+        - $ref: '#/components/parameters/SourceFilter'
+        - $ref: '#/components/parameters/ActionFilter'
+        - $ref: '#/components/parameters/ActionPrefixFilter'
+        - $ref: '#/components/parameters/OutcomeFilter'
+        - $ref: '#/components/parameters/ActorTypeFilter'
+        - $ref: '#/components/parameters/ActorIdFilter'
+        - $ref: '#/components/parameters/TargetTypeFilter'
+        - $ref: '#/components/parameters/TargetIdFilter'
+        - $ref: '#/components/parameters/IpFilter'
+        - $ref: '#/components/parameters/RequestIdFilter'
+        - $ref: '#/components/parameters/FromFilter'
+        - $ref: '#/components/parameters/ToFilter'
+        - $ref: '#/components/parameters/FormatParam'
+      responses:
+        '200':
+          description: >-
+            Streamed export body. `application/x-ndjson` (default) is one JSON-encoded event
+            object per line; `text/csv` is RFC 4180 with a header row
+            (`Exporter.CSV_COLUMNS`).
+          headers:
+            Content-Disposition:
+              description: 'attachment; filename="audit-<YYYY-MM-DD>.<format>"'
+              schema:
+                type: string
+            X-Export-Max-Rows:
+              description: The configured `EXPORT_MAX_ROWS` cap applied to this export.
+              schema:
+                type: string
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+                format: binary
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: A query parameter failed validation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/events/{id}:
+    get:
+      operationId: audit.events.get
+      tags: [events]
+      summary: Fetch one event by id.
+      x-required-role: read
+      parameters:
+        - $ref: '#/components/parameters/IdParam'
+      responses:
+        '200':
+          description: The event.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [event]
+                properties:
+                  event:
+                    $ref: '#/components/schemas/Event'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No event with this id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                eventNotFound:
+                  value: { error: { code: EVENT_NOT_FOUND, message: 'event not found' } }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/chain/head:
+    get:
+      operationId: audit.chain.getHead
+      tags: [chain]
+      summary: Current chain head.
+      description: >-
+        The last stored event's `{seq, hash}`, or the last purge checkpoint, or genesis
+        (`seq: 0`, a 64-zero hash) when the log is empty and has never been purged.
+      x-required-role: read
+      responses:
+        '200':
+          description: Chain head.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChainHead'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/chain/verify:
+    get:
+      operationId: audit.chain.verify
+      tags: [chain]
+      summary: Recompute and verify the hash chain over a sequence range.
+      description: >-
+        Defaults to the whole stored range when `fromSeq`/`toSeq` are omitted. When this
+        instance has anchoring configured, every anchor whose `seq` falls in range is also
+        checked against the recomputed hash and its Ed25519 signature; anchor problems are
+        reported in `anchors` and also fail `ok`.
+      x-required-role: read
+      parameters:
+        - $ref: '#/components/parameters/FromSeqParam'
+        - $ref: '#/components/parameters/ToSeqParam'
+      responses:
+        '200':
+          description: >-
+            Verification result — `200` regardless of `ok`; a broken chain is reported in the
+            body, not via the HTTP status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChainVerifyResult'
+        '400':
+          description: >-
+            `toSeq` is less than `fromSeq`, or the requested range exceeds `VERIFY_MAX_ROWS`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                rangeTooLarge:
+                  value: { error: { code: RANGE_TOO_LARGE, message: 'verify at most 100000 events per request' } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/chain/anchors:
+    get:
+      operationId: audit.anchors.list
+      tags: [chain]
+      summary: List signed chain anchors, newest first.
+      description: Keyset pagination via `beforeSeq`/`nextBeforeSeq`.
+      x-required-role: read
+      parameters:
+        - $ref: '#/components/parameters/AnchorsLimitParam'
+        - $ref: '#/components/parameters/BeforeSeqParam'
+      responses:
+        '200':
+          description: A page of anchors.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnchorList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/chain/anchors/latest:
+    get:
+      operationId: audit.anchors.getLatest
+      tags: [chain]
+      summary: Most recently written anchor.
+      x-required-role: read
+      responses:
+        '200':
+          description: The latest anchor.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [anchor]
+                properties:
+                  anchor:
+                    $ref: '#/components/schemas/Anchor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No anchor has been written yet.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              examples:
+                noAnchor:
+                  value: { error: { code: NOT_FOUND, message: 'no anchor has been written yet' } }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/stats:
+    get:
+      operationId: audit.stats.get
+      tags: [stats]
+      summary: Aggregate counters over a trailing time window.
+      x-required-role: read
+      parameters:
+        - $ref: '#/components/parameters/HoursParam'
+      responses:
+        '200':
+          description: Aggregate stats.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Stats'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque secret
+      description: >-
+        `Authorization: Bearer <secret>`. The secret is matched, constant-time, against
+        `AUDIT_API_KEYS` (`id:secret[:role]`); the matched key's own `id` becomes every ingested
+        event's `source`. Each key carries a `read`, `write` or `readwrite` role — the
+        `x-required-role` extension on each operation states which capability it needs
+        (`readwrite` satisfies either). A missing/unmatched key is `401 UNAUTHORIZED`; a
+        recognized key lacking the needed role is `403 FORBIDDEN`.
+
+  parameters:
+    SourceFilter:
+      name: source
+      in: query
+      schema: { type: string, pattern: '^[A-Za-z0-9_-]{1,64}$' }
+    ActionFilter:
+      name: action
+      in: query
+      schema: { $ref: '#/components/schemas/Action' }
+    ActionPrefixFilter:
+      name: actionPrefix
+      in: query
+      description: Prefix match on `action` (e.g. `auth.` matches `auth.login`, `auth.logout`).
+      schema: { type: string, pattern: '^[a-z0-9]+(\.[a-z0-9_-]*){0,5}$', maxLength: 120 }
+    OutcomeFilter:
+      name: outcome
+      in: query
+      schema: { $ref: '#/components/schemas/Outcome' }
+    ActorTypeFilter:
+      name: actorType
+      in: query
+      schema: { $ref: '#/components/schemas/PartyKind' }
+    ActorIdFilter:
+      name: actorId
+      in: query
+      schema: { $ref: '#/components/schemas/ShortId' }
+    TargetTypeFilter:
+      name: targetType
+      in: query
+      schema: { $ref: '#/components/schemas/PartyKind' }
+    TargetIdFilter:
+      name: targetId
+      in: query
+      schema: { $ref: '#/components/schemas/ShortId' }
+    IpFilter:
+      name: ip
+      in: query
+      schema: { type: string, minLength: 2, maxLength: 45 }
+    RequestIdFilter:
+      name: requestId
+      in: query
+      schema: { $ref: '#/components/schemas/ShortId' }
+    FromFilter:
+      name: from
+      in: query
+      description: Inclusive lower bound on event `at`.
+      schema: { type: string, format: date-time }
+    ToFilter:
+      name: to
+      in: query
+      description: Exclusive upper bound on event `at`.
+      schema: { type: string, format: date-time }
+    LimitParam:
+      name: limit
+      in: query
+      description: Page size, 1-200. Default 50.
+      schema: { type: string, pattern: '^([1-9]|[1-9][0-9]|1[0-9][0-9]|200)$' }
+    CursorParam:
+      name: cursor
+      in: query
+      description: Opaque keyset cursor from a previous page's `nextCursor`.
+      schema: { type: string, maxLength: 128 }
+    FormatParam:
+      name: format
+      in: query
+      description: Export format. Default `ndjson`.
+      schema: { type: string, enum: [ndjson, csv] }
+    IdParam:
+      name: id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Uuid' }
+    FromSeqParam:
+      name: fromSeq
+      in: query
+      description: Defaults to the smallest stored `seq`.
+      schema: { type: string, pattern: '^[1-9][0-9]{0,15}$' }
+    ToSeqParam:
+      name: toSeq
+      in: query
+      description: Defaults to the current chain head's `seq`.
+      schema: { type: string, pattern: '^[1-9][0-9]{0,15}$' }
+    HoursParam:
+      name: hours
+      in: query
+      description: Trailing window size in hours, 1-720. Default 24.
+      schema: { type: string, pattern: '^([1-9]|[1-9][0-9]|[1-6][0-9][0-9]|7[01][0-9]|720)$' }
+    AnchorsLimitParam:
+      name: limit
+      in: query
+      description: Page size, 1-200. Default 50.
+      schema: { type: string, pattern: '^([1-9]|[1-9][0-9]|1[0-9][0-9]|200)$' }
+    BeforeSeqParam:
+      name: beforeSeq
+      in: query
+      description: Keyset cursor from a previous page's `nextBeforeSeq`.
+      schema: { type: string, pattern: '^[1-9][0-9]{0,15}$' }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid API key.
+      headers:
+        WWW-Authenticate:
+          schema: { type: string, example: Bearer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            unauthorized:
+              value: { error: { code: UNAUTHORIZED, message: 'missing or invalid API key' } }
+    Forbidden:
+      description: The API key does not have the role this operation needs.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            forbidden:
+              value: { error: { code: FORBIDDEN, message: 'this API key has no read access' } }
+    RateLimited:
+      description: Too many requests from this API key in the current window.
+      headers:
+        Retry-After:
+          schema: { type: string }
+        X-RateLimit-Limit:
+          schema: { type: string }
+        X-RateLimit-Remaining:
+          schema: { type: string }
+        X-RateLimit-Reset:
+          schema: { type: string }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            rateLimited:
+              value: { error: { code: RATE_LIMITED, message: 'rate limit exceeded, retry in 12 seconds' } }
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: >-
+                Stable machine-readable code. Domain codes: EVENT_NOT_FOUND, INVALID_EVENT,
+                TIMESTAMP_INVALID, META_TOO_LARGE, BATCH_TOO_LARGE, INVALID_CURSOR,
+                RANGE_TOO_LARGE, FORBIDDEN. Cross-cutting codes from the shared Fastify error
+                handler: VALIDATION_FAILED (400, Ajv schema failure), UNAUTHORIZED (401),
+                NOT_FOUND (404, unmatched route or a resource with no dedicated domain code —
+                e.g. "no anchor has been written yet"), RATE_LIMITED (429), INTERNAL_ERROR (500).
+            message:
+              type: string
+            details:
+              description: Present on some 400s (Ajv validation) and domain errors with structured context.
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok] }
+
+    ReadyUnavailable:
+      type: object
+      required: [status, error]
+      properties:
+        status: { type: string, enum: [unavailable] }
+        error: { type: string }
+
+    Info:
+      type: object
+      required: [service, version, apiVersion, capabilities, schemaVersion, serviceCore]
+      properties:
+        service: { type: string, enum: [audit] }
+        version: { type: string, description: "This service's own package.json semver." }
+        apiVersion: { type: string, enum: [v1] }
+        capabilities:
+          type: array
+          items: { type: string, enum: [chain-verification, anchors, export] }
+          description: >-
+            Static list, not derived from this instance's actual configuration. Always includes
+            "anchors" even when no anchor signer is configured — see the operation description.
+        schemaVersion:
+          type: integer
+          description: Current SQLite `PRAGMA user_version` for this instance's database.
+        serviceCore:
+          type: string
+          description: Installed `@atc-web/service-core` version.
+
+    AnchorKeyInfo:
+      type: object
+      required: [current, previous]
+      properties:
+        current: { $ref: '#/components/schemas/AnchorKey' }
+        previous:
+          oneOf:
+            - $ref: '#/components/schemas/AnchorKey'
+            - type: 'null'
+
+    AnchorKey:
+      type: object
+      required: [keyId, algorithm, publicKey]
+      properties:
+        keyId: { type: string, description: First 16 hex chars of the SPKI DER's SHA-256. }
+        algorithm: { type: string, enum: [Ed25519] }
+        publicKey: { type: string, description: SPKI PEM. }
+
+    Uuid:
+      type: string
+      format: uuid
+
+    Action:
+      type: string
+      pattern: '^[a-z0-9]+(\.[a-z0-9_-]+){1,5}$'
+      maxLength: 120
+      description: 'Dotted, lower-case: `auth.login`, `order.item.remove`.'
+
+    Outcome:
+      type: string
+      enum: [success, failure, denied]
+
+    PartyKind:
+      type: string
+      pattern: '^[a-z][a-z0-9_-]{0,31}$'
+
+    ShortId:
+      type: string
+      minLength: 1
+      maxLength: 128
+
+    Party:
+      type: object
+      additionalProperties: false
+      required: [type, id]
+      properties:
+        type: { $ref: '#/components/schemas/PartyKind' }
+        id: { $ref: '#/components/schemas/ShortId' }
+        name: { type: string, minLength: 1, maxLength: 200 }
+
+    EventCreate:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+          description: >-
+            Caller-supplied idempotency key (`clientId`). A repeat for the same `source` returns
+            the existing row instead of storing a new one.
+        action: { $ref: '#/components/schemas/Action' }
+        outcome: { $ref: '#/components/schemas/Outcome', default: success }
+        actor: { $ref: '#/components/schemas/Party' }
+        target: { $ref: '#/components/schemas/Party' }
+        ip: { type: string, minLength: 2, maxLength: 45 }
+        userAgent: { type: string, maxLength: 512 }
+        requestId: { $ref: '#/components/schemas/ShortId' }
+        meta:
+          type: object
+          description: >-
+            Redacted server-side (default key list: password, secret, token, apiKey, ...) before
+            storage; rejected with `META_TOO_LARGE` above the configured byte limit
+            (`META_MAX_BYTES`, default 8192) after redaction and canonical serialization.
+        at:
+          type: string
+          format: date-time
+          description: >-
+            Defaults to server receive time. Rejected with `TIMESTAMP_INVALID` if unparseable or
+            more than `CLOCK_SKEW_SEC` (default 300s) in the future.
+
+    EventBatchCreate:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          minItems: 1
+          maxItems: 5000
+          items: { $ref: '#/components/schemas/EventCreate' }
+
+    Event:
+      type: object
+      description: Stored event, as returned by query/get/export endpoints.
+      required:
+        - id
+        - seq
+        - clientId
+        - source
+        - action
+        - outcome
+        - actor
+        - target
+        - ip
+        - userAgent
+        - requestId
+        - meta
+        - at
+        - receivedAt
+        - prevHash
+        - hash
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        seq: { type: integer, description: Monotonic hash-chain sequence number. }
+        clientId:
+          oneOf: [{ type: string }, { type: 'null' }]
+          description: The caller-supplied idempotency key (request body `id`), if any.
+        source: { type: string, description: "Writer's API key id." }
+        action: { $ref: '#/components/schemas/Action' }
+        outcome: { $ref: '#/components/schemas/Outcome' }
+        actor:
+          oneOf:
+            - type: object
+              required: [type, id]
+              properties:
+                type: { $ref: '#/components/schemas/PartyKind' }
+                id: { $ref: '#/components/schemas/ShortId' }
+                name: { type: string }
+            - type: 'null'
+        target:
+          oneOf:
+            - type: object
+              required: [type, id]
+              properties:
+                type: { $ref: '#/components/schemas/PartyKind' }
+                id: { $ref: '#/components/schemas/ShortId' }
+                name: { type: string }
+            - type: 'null'
+        ip:
+          oneOf: [{ type: string }, { type: 'null' }]
+        userAgent:
+          oneOf: [{ type: string }, { type: 'null' }]
+        requestId:
+          oneOf: [{ type: string }, { type: 'null' }]
+        meta:
+          oneOf: [{ type: object }, { type: 'null' }]
+        at: { type: string, format: date-time }
+        receivedAt: { type: string, format: date-time }
+        prevHash: { type: string, description: Hash of the previous row in the chain. }
+        hash: { type: string, description: 'SHA-256(prevHash + "\n" + canonical(event fields)).' }
+
+    EventCreateResponse:
+      type: object
+      required: [event, duplicate]
+      properties:
+        event: { $ref: '#/components/schemas/Event' }
+        duplicate: { type: boolean }
+
+    EventBatchCreateResponse:
+      type: object
+      required: [accepted, duplicates, items]
+      properties:
+        accepted: { type: integer }
+        duplicates: { type: integer }
+        items:
+          type: array
+          items:
+            type: object
+            required: [id, seq, clientId, duplicate]
+            properties:
+              id: { $ref: '#/components/schemas/Uuid' }
+              seq: { type: integer }
+              clientId:
+                oneOf: [{ type: string }, { type: 'null' }]
+              duplicate: { type: boolean }
+
+    EventList:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Event' }
+        nextCursor:
+          oneOf: [{ type: string }, { type: 'null' }]
+
+    ChainHead:
+      type: object
+      required: [seq, hash]
+      properties:
+        seq: { type: integer }
+        hash: { type: string }
+
+    ChainVerifyResult:
+      type: object
+      required: [ok, checked, fromSeq, toSeq, firstBroken, head, anchors]
+      properties:
+        ok:
+          type: boolean
+          description: Whether the recomputed chain (and, if configured, every in-range anchor) matched.
+        checked:
+          type: integer
+          description: Number of events actually recomputed.
+        fromSeq:
+          oneOf: [{ type: integer }, { type: 'null' }]
+          description: 'Null only when the store has never held an event.'
+        toSeq:
+          oneOf: [{ type: integer }, { type: 'null' }]
+        firstBroken:
+          oneOf: [{ type: integer }, { type: 'null' }]
+          description: First `seq` where a break was found; `null` when `ok` is true.
+        head: { $ref: '#/components/schemas/ChainHead' }
+        reason:
+          type: string
+          description: Present only when `ok` is `false`; human-readable cause.
+        anchors:
+          type: object
+          required: [checked, invalid]
+          properties:
+            checked:
+              type: integer
+              description: Number of anchors in range checked (0 when anchoring is not configured).
+            invalid:
+              type: array
+              items:
+                type: object
+                required: [seq, reason]
+                properties:
+                  seq: { type: integer }
+                  reason: { type: string }
+
+    Anchor:
+      type: object
+      required: [seq, hash, at, keyId, signature]
+      properties:
+        seq: { type: integer }
+        hash: { type: string }
+        at: { type: string, format: date-time }
+        keyId: { type: string }
+        signature: { type: string, description: Base64url Ed25519 signature. }
+
+    AnchorList:
+      type: object
+      required: [items, nextBeforeSeq]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Anchor' }
+        nextBeforeSeq:
+          oneOf: [{ type: integer }, { type: 'null' }]
+
+    Stats:
+      type: object
+      required: [windowHours, since, total, byOutcome, bySource, topActions, topActors, topFailures]
+      properties:
+        windowHours: { type: integer }
+        since: { type: string, format: date-time }
+        total: { type: integer }
+        byOutcome:
+          type: object
+          additionalProperties: { type: integer }
+        bySource:
+          type: array
+          items:
+            type: object
+            required: [source, count]
+            properties:
+              source: { type: string }
+              count: { type: integer }
+        topActions:
+          type: array
+          items:
+            type: object
+            required: [action, count]
+            properties:
+              action: { type: string }
+              count: { type: integer }
+        topActors:
+          type: array
+          items:
+            type: object
+            required: [type, id, name, count]
+            properties:
+              type: { type: string }
+              id: { type: string }
+              name:
+                oneOf: [{ type: string }, { type: 'null' }]
+              count: { type: integer }
+        topFailures:
+          type: array
+          items:
+            type: object
+            required: [action, count]
+            properties:
+              action: { type: string }
+              count: { type: integer }
