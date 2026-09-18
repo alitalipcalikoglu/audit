@@ -212,14 +212,20 @@ services) and logs it via Fastify's default request logging. Does not parse or f
 Back up the database file; the whole point of the chain is that a restore from an incomplete
 backup is detectable (`GET /v1/chain/verify` will report a gap) rather than silently wrong. Use
 `stack backup`/`stack restore` from the workspace root (see `stack/docs/UPGRADE.md`) to do this
-consistently alongside the rest of the stack — audit is not itself included in its own backup scope
-beyond its database. On every start, before applying a pending migration to an existing database,
-the service itself also snapshots the file to `DB_PATH.pre-v<N>-<timestamp>` (directory overridable
-with `DB_BACKUP_DIR`) — a manual last resort if `stack restore` is unavailable. If anchors are
-configured, back up `keys/` (the anchor signing key pair, and the previous public key during a
-rotation) alongside the database, the same as `auth` backs up its JWT keys — losing the private key
-means no *new* anchor can ever be signed under that `keyId` again (generate a fresh pair and treat
-it as a rotation), though every anchor already written and verified stays valid.
+consistently alongside the rest of the stack — when anchors are configured (`ANCHOR_PRIVATE_KEY_PATH`
+set), `stack backup` includes the anchor signing key pair (and the previous public key, during a
+rotation) in the same snapshot as the database, resolved from the real configured path, the same way
+`auth` backs up its JWT keys (see `stack/docs/BACKUP.md`, "Anchor key backup semantics" — the exact
+path is not assumed to be `keys/`, and a path pointing outside this service's own folder is
+deliberately excluded rather than followed). On every start, before applying a pending migration to
+an existing database, the service itself also snapshots the file to `DB_PATH.pre-v<N>-<timestamp>`
+(directory overridable with `DB_BACKUP_DIR`) — a manual last resort if `stack restore` is unavailable.
+Losing the private key entirely (outside a `stack backup`/`stack restore` round-trip — e.g. it was
+never backed up, or anchoring was only enabled after the fact) means no *new* anchor can ever be
+signed under that `keyId` again (generate a fresh pair and treat it as a rotation), though every
+anchor already written and verified stays valid. **A `stack backup` snapshot with anchoring
+configured contains real private key material — see `stack/docs/BACKUP.md`'s security note before
+treating it as an ordinary data export.**
 
 **Rollback limitations:** none of the migrations are reversible; to roll back, restore the
 pre-migration copy (or a `stack backup` snapshot taken before the upgrade) and run the previous

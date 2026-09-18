@@ -72,8 +72,10 @@ effects to repeat.
 The entire chain is the thing to protect — losing it loses the audit history it exists to keep, and
 a restore from an incomplete backup is detectably incomplete (chain verification will report a gap)
 rather than silently wrong, which is a useful property but not a substitute for backing it up. If
-anchors are configured, `keys/` (the Ed25519 signing key pair, and the previous public key during a
-rotation) is backed up alongside the database — see README.md's "Chain anchors".
+anchors are configured, `stack backup` includes the Ed25519 signing key pair (and the previous public
+key, during a rotation) in the same snapshot as the database, resolved from the real configured
+`ANCHOR_PRIVATE_KEY_PATH`/`ANCHOR_PREVIOUS_PUBLIC_KEY_PATH` — see README.md's "Chain anchors" and
+`stack/docs/BACKUP.md`'s "Anchor key backup semantics".
 
 ## Restore
 
