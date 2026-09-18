@@ -184,12 +184,20 @@ Class-based; dependencies are injected through constructors, `src/application.js
 - Full-text search inside `meta`: index the identifiers you filter on as `actor`/`target`/`requestId`; run ad-hoc analysis on exports.
 - Multi-writer or clustered storage: one process per SQLite file keeps the chain linear. Run one instance per environment.
 
+## Audit events
+
+This service is the sink, not a producer — see "Model" above for the event shape and "API" for how
+callers record events (`POST /v1/events`, `POST /v1/events/batch`). It does not run an `AuditClient`
+against itself; there is nowhere else to forward to. Every other service in the workspace
+authenticates with a `write`-role key from `AUDIT_API_KEYS` and posts its own write and security
+events here.
+
 ## Scaling model
 
-Single-node stateful: one process owns the SQLite chain. The append path (`BEGIN IMMEDIATE` around
-reading the current head and inserting) is what keeps the chain from forking within that process;
-running two processes against the same file is not the deployment model this is built or tested
-for.
+**B — single-node stateful.** One process owns the SQLite chain. The append path (`BEGIN IMMEDIATE`
+around reading the current head and inserting) is what keeps the chain from forking within that
+process; running two processes against the same file is not the deployment model this is built or
+tested for.
 
 ## Observability
 
