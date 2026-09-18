@@ -94,16 +94,21 @@ restart does not reset anything `/metrics` reports.
 ## Logging
 
 Fastify's default request logging (`requestIdHeader: 'x-request-id'`, so it already logs whichever
-id the caller — gateway, console, or a peer service — sent). Redacts `authorization`. See
-[OBSERVABILITY.md](../../stack/docs/OBSERVABILITY.md) for the target vocabulary this does not yet
-fully emit (`service`, `version`, `traceId`).
+id the caller — gateway, console, or a peer service — sent), plus `traceId`/`spanId` (see Tracing
+below). Redacts `authorization`. See [OBSERVABILITY.md](../../stack/docs/OBSERVABILITY.md) for the
+target vocabulary this does not yet fully emit (`service`, `version`).
 
 ## Tracing
 
 Accepts an inbound `X-Request-Id` unconditionally (internal service, reached only from other
-services on a private network — see OBSERVABILITY.md's trust-boundary discussion). Does not yet
-parse or log `traceparent`; the anchor webhook push (when configured) does not carry one either — it
-posts a signed anchor record, not a request being proxied on behalf of an inbound caller.
+services on a private network — see OBSERVABILITY.md's trust-boundary discussion). Also parses an
+inbound `traceparent` via `@atc-web/service-core`'s `registerRequestContext`, trust-gated on
+`TRUST_PROXY` (same boundary): trusted, the caller's trace-id is continued with a fresh span-id;
+untrusted or malformed, a fresh trace is started. Both `traceId`/`spanId` are logged on every
+request line. The anchor webhook push (when configured) does not carry one either — it posts a
+signed anchor record to an external, operator-configured target, not a request being proxied on
+behalf of an inbound caller; a security-regression test confirms no trace/request-id header leaks
+onto that call.
 
 ## Security model
 

@@ -202,9 +202,13 @@ tested for.
 ## Observability
 
 Accepts an inbound `X-Request-Id` unconditionally (an internal service, reached only from other
-services) and logs it via Fastify's default request logging. Does not parse or forward
-`traceparent`; the one outbound call this service can make — `ANCHOR_WEBHOOK_URL`, when configured
-— does not carry one either, since it posts a signed anchor record, not a request being proxied.
+services) and logs it via Fastify's default request logging. Also parses an inbound `traceparent`,
+trusted only when `TRUST_PROXY=true` — the caller's trace-id is continued with a fresh span-id for
+this hop, both logged as `traceId`/`spanId` via `@atc-web/service-core`'s `registerRequestContext`.
+The one outbound call this service can make — `ANCHOR_WEBHOOK_URL`, when configured — does not
+carry a trace header either, since it posts a signed anchor record to an external, operator-configured
+target, not a request being proxied (proven by a security-regression test — see
+[OBSERVABILITY.md](../stack/docs/OBSERVABILITY.md)).
 `/metrics` is entirely database-derived — nothing here resets on restart.
 
 ## Backup / restore

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -255,6 +256,27 @@ test('AnchorWebhook: NetGuard SSRF refusal propagates as a rejection the caller 
   const guard = new NetGuard({ allowPrivate: false }); // default: refuses a private-range target
   const webhook = new AnchorWebhook({ url: 'http://127.0.0.1:1/anchor', guard, timeoutMs: 1000 });
   await assert.rejects(() => webhook.post({ seq: 1, hash: 'a'.repeat(64), at: 1000, key_id: 'k', signature: 's' }));
+});
+
+test('Post-production Phase 5 security regression: AnchorWebhook never leaks platform trace/request-id headers to an external, operator-configured target', async () => {
+  /** @type {import('node:http').IncomingHttpHeaders|null} */
+  let seenHeaders = null;
+  const server = createServer((req, res) => {
+    seenHeaders = req.headers;
+    res.writeHead(200).end('ok');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', () => r(undefined)));
+  try {
+    const port = /** @type {import('node:net').AddressInfo} */ (server.address()).port;
+    const guard = new NetGuard({ allowHttp: true, allowPrivate: true, allowedHosts: ['127.0.0.1'] });
+    const webhook = new AnchorWebhook({ url: `http://127.0.0.1:${port}/anchor`, guard, timeoutMs: 1000 });
+    await webhook.post({ seq: 1, hash: 'a'.repeat(64), at: 1000, key_id: 'k', signature: 's' });
+    assert.ok(seenHeaders, 'the external server actually received the request');
+    assert.equal('traceparent' in /** @type {object} */ (seenHeaders), false, 'no platform traceparent sent to an external target');
+    assert.equal('x-request-id' in /** @type {object} */ (seenHeaders), false, 'no platform request-id sent to an external target');
+  } finally {
+    server.close();
+  }
 });
 
 // ---------------------------------------------------------------- HTTP routes
