@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
-import { createErrorHandler, registerInfo, registerProbes, registerRequestContext, requestOptions } from '@atc-web/service-core/fastify';
+import { createErrorHandler, registerInfo, registerOpenApi, registerProbes, registerRequestContext, requestOptions } from '@atc-web/service-core/fastify';
 import { AuditError } from '../domain/errors.js';
 import { ApiKeyAuth } from './api-key-auth.js';
 import { Exporter } from './exporter.js';
@@ -63,6 +63,7 @@ export class AuditApi {
       if (!reply.hasHeader('cache-control')) reply.header('cache-control', 'no-store');
     });
     registerProbes(app, () => this.db.ping(), { cacheMs: AuditApi.READY_CACHE_MS });
+    registerOpenApi(app, new URL('../../openapi.yaml', import.meta.url));
     registerInfo(app, {
       service: 'audit',
       version: this.version,

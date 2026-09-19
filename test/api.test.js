@@ -13,6 +13,9 @@ test('API: health, ready, auth and roles', async (t) => {
   t.after(() => app.close());
   assert.equal((await app.inject({ url: '/health' })).statusCode, 200);
   assert.equal((await app.inject({ url: '/ready' })).statusCode, 200);
+  const spec = await app.inject({ url: '/openapi.yaml' });
+  assert.equal(spec.body, readFileSync(new URL('../openapi.yaml', import.meta.url), 'utf8'));
+  assert.match(String(spec.headers['content-type']), /^text\/yaml/);
   const noKey = await app.inject({ url: '/v1/events' });
   assert.equal(noKey.statusCode, 401);
   assert.equal(noKey.headers['www-authenticate'], 'Bearer');
