@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: audit
-  version: 1.0.0
+  version: 1.1.0
   description: >-
     Central append-only audit log. Services push events over HTTP; the log keeps a
     tamper-evident SHA-256 hash chain over stored events, offers filtered queries, NDJSON/CSV
