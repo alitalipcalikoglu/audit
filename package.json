@@ -1,6 +1,6 @@
 {
   "name": "@atc-web/audit",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "description": "Central append-only audit log: services push events over HTTP, the log keeps a tamper-evident hash chain, offers filtered queries, export and retention",
   "license": "MIT",
